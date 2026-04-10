@@ -1,0 +1,27 @@
+title: Rain
+description: C++23 异步运行时文档
+lang: zh-CN
+timezone: Asia/Shanghai
+url: ""
+baseurl: ""
+logo: /images/rain-logo.svg
+footer_owner: Rain contributors
+
+markdown: kramdown
+kramdown:
+  input: GFM
+  hard_wrap: false
+
+permalink: pretty
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - README.md
+  - vendor

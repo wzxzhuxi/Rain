@@ -1,0 +1,33 @@
+# Rain .gitignore -- whitelist mode
+
+# Ignore everything
+*
+
+# Allow structure
+!.gitignore
+!CMakeLists.txt
+!README.md
+!README_EN.md
+
+# Allow source
+!src/
+!src/*/
+!src/**/*.hpp
+
+# Allow tests
+!test/
+!test/*.cpp
+
+# Allow benchmarks
+!benchmark/
+!benchmark/*.cpp
+!benchmark/*.sh
+!benchmark/tokio_echo/
+!benchmark/tokio_echo/Cargo.toml
+!benchmark/tokio_echo/src/
+!benchmark/tokio_echo/src/*.rs
+
+!LICENSE
+
+!jekyll/
+!jekyll/*
