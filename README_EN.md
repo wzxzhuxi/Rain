@@ -57,11 +57,14 @@ bash benchmark/run_bench.sh
 
 ### Why is Rain even faster than Tokio?
 Is Lao Wang a genius? Unfortunately, no.
-Rain is faster than Tokio here because Rain does not use work stealing, so it avoids the overhead of cross-CPU task transfer.
-So does Rain have no application-level automatic load balancing? Correct. Rain does not implement application-level automatic load balancing. Instead, it relies on kernel-level load balancing.
-For network tasks, `SO_REUSEPORT` lets the kernel automatically distribute incoming connections across CPU cores.
-That avoids the overhead of automatic cross-core task transfer.
-So does Rain have no cross-core task handoff at all? Not exactly. We can use `EventLoop::submit` to dispatch a task to a specified core when cross-core transfer is needed.
+
+Rain comes out ahead in this benchmark mainly because it does not use work stealing. That removes a chunk of the overhead caused by moving tasks across CPU cores.
+
+Does that mean Rain has no application-level automatic load balancing? Correct. Rain does not try to balance work at the application layer. Instead, it leans on kernel-level load balancing.
+
+For network workloads, `SO_REUSEPORT` lets the kernel distribute incoming connections across CPU cores automatically. That avoids much of the cost of automatic cross-core task transfer.
+
+Does that mean Rain cannot hand work across cores at all? Also no. When cross-core handoff is needed, `EventLoop::submit()` can explicitly dispatch a task to a target core.
 
 ## Architecture
 
