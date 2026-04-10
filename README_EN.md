@@ -23,6 +23,8 @@
   <img alt="License" src="https://img.shields.io/badge/License-MIT-16a34a?style=flat-square">
 </p>
 
+Documentation site: [Rain](https://wzxzhuxi.github.io/Rain/)
+
 Rain is a Linux-oriented C++23 async runtime built around per-core event loops, coroutine tasks, an epoll reactor, a hierarchical timer wheel, a thread pool, and a sync-async bridge.
 
 The goal is not to maximize features. The goal is to keep the runtime small enough that each component can be read and understood in isolation.
