@@ -5,6 +5,9 @@
 
 # Allow structure
 !.gitignore
+!.github/
+!.github/workflows/
+!.github/workflows/**
 !CMakeLists.txt
 !README.md
 !README_EN.md
