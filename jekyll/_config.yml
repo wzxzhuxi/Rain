@@ -2,8 +2,8 @@ title: Rain
 description: C++23 异步运行时文档
 lang: zh-CN
 timezone: Asia/Shanghai
-url: ""
-baseurl: ""
+url: "https://wzxzhuxi.github.io"
+baseurl: "/Rain"
 logo: /images/rain-logo.svg
 footer_owner: Rain contributors
 
