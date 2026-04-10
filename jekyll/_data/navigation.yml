@@ -1,0 +1,14 @@
+- title: 文档
+  children:
+    - title: 安装与使用
+      url: /install-and-usage/
+    - title: API 文档
+      url: /api/
+    - title: 子库说明
+      url: /libraries/
+    - title: 阅读地图
+      url: /reading-map/
+    - title: 基准测试
+      url: /benchmark/
+    - title: 参与贡献
+      url: /contributing/

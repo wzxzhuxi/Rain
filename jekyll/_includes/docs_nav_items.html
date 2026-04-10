@@ -1,0 +1,28 @@
+{% assign nav_items = include.items %}
+{% assign nav_level = include.level | default: 1 %}
+<ul class="docs-nav-list docs-nav-level-{{ nav_level }}">
+  {% for item in nav_items %}
+    {% assign item_url = item.url | default: "" %}
+    {% assign is_exact = false %}
+    {% assign is_section = false %}
+    {% if item_url != "" and page.url == item_url %}
+      {% assign is_exact = true %}
+    {% endif %}
+    {% if item_url != "" and page.url != item_url and page.url contains item_url %}
+      {% assign is_section = true %}
+    {% endif %}
+    <li class="docs-nav-item{% if is_exact %} is-current{% endif %}{% if is_section %} is-section{% endif %}">
+      {% if item_url != "" %}
+        <a href="{{ item_url | relative_url }}">{{ item.title }}</a>
+      {% else %}
+        {% if item.title and item.title != "" %}
+          <span class="docs-nav-label">{{ item.title }}</span>
+        {% endif %}
+      {% endif %}
+      {% if item.children %}
+        {% assign next_level = nav_level | plus: 1 %}
+        {% include docs_nav_items.html items=item.children level=next_level %}
+      {% endif %}
+    </li>
+  {% endfor %}
+</ul>

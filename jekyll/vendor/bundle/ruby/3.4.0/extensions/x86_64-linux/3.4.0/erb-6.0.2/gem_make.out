@@ -1,0 +1,19 @@
+current directory: /home/fuck/projects/FunServe/rain/jekyll/vendor/bundle/ruby/3.4.0/gems/erb-6.0.2/ext/erb/escape
+/usr/bin/ruby extconf.rb
+checking for rb_ext_ractor_safe() in ruby.h... yes
+creating Makefile
+
+current directory: /home/fuck/projects/FunServe/rain/jekyll/vendor/bundle/ruby/3.4.0/gems/erb-6.0.2/ext/erb/escape
+make DESTDIR\= sitearchdir\=./.gem.20260410-1096156-hy7emh sitelibdir\=./.gem.20260410-1096156-hy7emh clean
+
+current directory: /home/fuck/projects/FunServe/rain/jekyll/vendor/bundle/ruby/3.4.0/gems/erb-6.0.2/ext/erb/escape
+make DESTDIR\= sitearchdir\=./.gem.20260410-1096156-hy7emh sitelibdir\=./.gem.20260410-1096156-hy7emh
+compiling escape.c
+linking shared-object erb/escape.so
+
+current directory: /home/fuck/projects/FunServe/rain/jekyll/vendor/bundle/ruby/3.4.0/gems/erb-6.0.2/ext/erb/escape
+make DESTDIR\= sitearchdir\=./.gem.20260410-1096156-hy7emh sitelibdir\=./.gem.20260410-1096156-hy7emh install
+/usr/bin/install -c -m 0755 escape.so ./.gem.20260410-1096156-hy7emh/erb
+
+current directory: /home/fuck/projects/FunServe/rain/jekyll/vendor/bundle/ruby/3.4.0/gems/erb-6.0.2/ext/erb/escape
+make DESTDIR\= sitearchdir\=./.gem.20260410-1096156-hy7emh sitelibdir\=./.gem.20260410-1096156-hy7emh clean

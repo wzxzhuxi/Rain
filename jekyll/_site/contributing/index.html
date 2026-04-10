@@ -1,0 +1,755 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>参与贡献 | Rain</title>
+  <meta name="description" content="Rain 的代码、测试、文档与 benchmark 贡献说明">
+  <link rel="stylesheet" href="/assets/css/site.css">
+</head>
+<body class="is-doc">
+  <header class="topbar">
+    <div class="topbar-row">
+      <a class="brand" href="/">
+        <img class="brand-mark" src="/images/rain-logo.svg" alt="">
+        <span class="brand-text">Rain</span>
+      </a>
+      <nav class="main-nav" id="main-nav" data-nav>
+        
+          
+            
+            
+            <div class="nav-group active" data-dropdown>
+              <button class="nav-trigger active" type="button" data-dropdown-trigger aria-expanded="false">
+                <span>文档</span>
+                <span class="nav-caret" aria-hidden="true"></span>
+              </button>
+              <div class="nav-dropdown" role="menu">
+                
+                  <a href="/install-and-usage/" class="" role="menuitem">
+                    安装与使用
+                  </a>
+                
+                  <a href="/api/" class="" role="menuitem">
+                    API 文档
+                  </a>
+                
+                  <a href="/libraries/" class="" role="menuitem">
+                    子库说明
+                  </a>
+                
+                  <a href="/reading-map/" class="" role="menuitem">
+                    阅读地图
+                  </a>
+                
+                  <a href="/benchmark/" class="" role="menuitem">
+                    基准测试
+                  </a>
+                
+                  <a href="/contributing/" class="active" role="menuitem">
+                    参与贡献
+                  </a>
+                
+              </div>
+            </div>
+          
+        
+      </nav>
+      <div class="topbar-tools">
+        <button class="search-toggle" type="button" data-search-open aria-haspopup="dialog">
+          <span class="search-label">搜索</span>
+          <span class="search-shortcut">Ctrl K</span>
+        </button>
+        <button class="nav-toggle" type="button" data-nav-toggle aria-expanded="false" aria-controls="main-nav">菜单</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    
+      <div class="docs-shell">
+        <aside class="docs-sidebar" aria-label="章节导航">
+          <div class="docs-sidebar-inner">
+            
+
+<ul class="docs-nav-list docs-nav-level-1">
+  
+    
+    
+    
+    
+    
+    <li class="docs-nav-item">
+      
+        
+      
+      
+        
+        
+
+<ul class="docs-nav-list docs-nav-level-2">
+  
+    
+    
+    
+    
+    
+    <li class="docs-nav-item">
+      
+        <a href="/install-and-usage/">安装与使用</a>
+      
+      
+    </li>
+  
+    
+    
+    
+    
+    
+    <li class="docs-nav-item">
+      
+        <a href="/api/">API 文档</a>
+      
+      
+    </li>
+  
+    
+    
+    
+    
+    
+    <li class="docs-nav-item">
+      
+        <a href="/libraries/">子库说明</a>
+      
+      
+    </li>
+  
+    
+    
+    
+    
+    
+    <li class="docs-nav-item">
+      
+        <a href="/reading-map/">阅读地图</a>
+      
+      
+    </li>
+  
+    
+    
+    
+    
+    
+    <li class="docs-nav-item">
+      
+        <a href="/benchmark/">基准测试</a>
+      
+      
+    </li>
+  
+    
+    
+    
+    
+    
+    <li class="docs-nav-item is-current">
+      
+        <a href="/contributing/">参与贡献</a>
+      
+      
+    </li>
+  
+</ul>
+
+      
+    </li>
+  
+</ul>
+
+          </div>
+        </aside>
+        <article class="docs-content" data-doc-content>
+          <section class="content-page">
+
+  <h1 id="section">参与贡献</h1>
+
+  <h2 id="section-1">提交前验证</h2>
+
+  <p>建议至少执行：</p>
+
+  <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nb">cd </span>rain
+cmake <span class="nt">-B</span> build
+cmake <span class="nt">--build</span> build
+./build/rain_compile_check
+</code></pre></div>  </div>
+
+  <p>如果改动了 benchmark：</p>
+
+  <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nb">cd </span>rain
+cmake <span class="nt">-B</span> build <span class="nt">-DRAIN_BUILD_BENCHMARKS</span><span class="o">=</span>ON
+cmake <span class="nt">--build</span> build
+bash benchmark/run_bench.sh
+</code></pre></div>  </div>
+
+  <h2 id="section-2">文档贡献</h2>
+
+  <p>提交文档前请执行：</p>
+
+  <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nb">cd </span>rain/jekyll
+bundle <span class="nb">exec </span>jekyll build
+</code></pre></div>  </div>
+
+  <h2 id="section-3">提交建议</h2>
+
+  <ul>
+    <li>提交信息保持简短、动词开头。</li>
+    <li>说明改动涉及的模块层级，例如 <code class="language-plaintext highlighter-rouge">async</code>、<code class="language-plaintext highlighter-rouge">runtime</code> 或 <code class="language-plaintext highlighter-rouge">net</code>。</li>
+    <li>如果修改了公开 API，请同步更新 <code class="language-plaintext highlighter-rouge">README</code>、<code class="language-plaintext highlighter-rouge">README_EN</code> 和对应文档页面。</li>
+    <li>如果修改了教学章节，请确认侧边栏顺序和阅读地图仍然连贯。</li>
+  </ul>
+
+</section>
+
+        </article>
+        <aside class="docs-toc" aria-label="本章目录">
+          <div class="docs-toc-inner">
+            <p class="docs-toc-title">本章目录</p>
+            <ul class="docs-toc-list" data-doc-toc-list></ul>
+            <p class="docs-toc-empty" data-doc-toc-empty hidden>本页暂无二级标题。</p>
+          </div>
+        </aside>
+      </div>
+    
+  </main>
+
+  
+  <div class="search-overlay" data-search-overlay hidden>
+    <div class="search-dialog" role="dialog" aria-modal="true" aria-label="站内搜索">
+      <div class="search-head">
+        <input class="search-input" type="search" placeholder="搜索文档..." data-search-input autocomplete="off">
+        <button class="search-close" type="button" data-search-close>关闭</button>
+      </div>
+      <p class="search-hint">输入关键词筛选文档，按 ↑/↓ 选择结果，按回车打开，按 Esc 关闭。</p>
+      <ul class="search-results" data-search-results></ul>
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script>
+    (() => {
+      const mermaidApi = window.mermaid;
+      if (!mermaidApi) {
+        return;
+      }
+
+      const blocks = Array.from(document.querySelectorAll("pre > code.language-mermaid"));
+      if (!blocks.length) {
+        return;
+      }
+
+      mermaidApi.initialize({
+        startOnLoad: false,
+        securityLevel: "loose"
+      });
+
+      blocks.forEach((code) => {
+        const pre = code.parentElement;
+        if (!pre) {
+          return;
+        }
+
+        const host = pre.parentElement && pre.parentElement.classList.contains("highlighter-rouge")
+          ? pre.parentElement
+          : pre;
+
+        const target = document.createElement("div");
+        target.className = "mermaid";
+        target.textContent = code.textContent || "";
+        host.replaceWith(target);
+      });
+
+      mermaidApi.run({ querySelector: ".mermaid" });
+    })();
+  </script>
+  <script>
+    (() => {
+      const nav = document.querySelector("[data-nav]");
+      const navToggle = document.querySelector("[data-nav-toggle]");
+      const dropdowns = Array.from(document.querySelectorAll("[data-dropdown]"));
+      const searchOpenButton = document.querySelector("[data-search-open]");
+      const searchOverlay = document.querySelector("[data-search-overlay]");
+      const searchInput = document.querySelector("[data-search-input]");
+      const searchCloseButton = document.querySelector("[data-search-close]");
+      const searchResults = document.querySelector("[data-search-results]");
+      const docContent = document.querySelector("[data-doc-content]");
+      const docTocList = document.querySelector("[data-doc-toc-list]");
+      const docTocEmpty = document.querySelector("[data-doc-toc-empty]");
+      const isApple = /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
+      const searchData = [
+        
+          
+            {
+              title: "API 文档",
+              url: "/api/",
+              description: "Rain 最常用的运行时、协程、网络与阻塞桥接入口概览"
+            },
+          
+        
+          
+            {
+              title: "基准测试",
+              url: "/benchmark/",
+              description: "Rain 当前 echo benchmark 的口径、结果与对照代码"
+            },
+          
+        
+          
+            {
+              title: "参与贡献",
+              url: "/contributing/",
+              description: "Rain 的代码、测试、文档与 benchmark 贡献说明"
+            },
+          
+        
+          
+            {
+              title: "Rain",
+              url: "/",
+              description: "面向可理解性的 C++23 异步运行时"
+            },
+          
+        
+          
+            {
+              title: "安装与使用",
+              url: "/install-and-usage/",
+              description: "Rain 的构建、最小启动、benchmark 与本地文档预览方式"
+            },
+          
+        
+          
+            {
+              title: "子库说明",
+              url: "/libraries/",
+              description: "Rain 五层模块职责、依赖方向与源码切入点"
+            },
+          
+        
+          
+            {
+              title: "阅读地图",
+              url: "/reading-map/",
+              description: "Rain 的源码入口、模块顺序和关键系统调用地图"
+            },
+          
+        
+      ];
+      const searchState = {
+        query: "",
+        items: [],
+        selectedIndex: -1
+      };
+
+      const clampIndex = (index, length) => {
+        if (!length) {
+          return -1;
+        }
+        if (index < 0) {
+          return length - 1;
+        }
+        if (index >= length) {
+          return 0;
+        }
+        return index;
+      };
+
+      const appendHighlightedText = (target, text, query) => {
+        target.textContent = "";
+        const raw = String(text || "");
+        const keyword = String(query || "").trim().toLowerCase();
+        if (!keyword) {
+          target.textContent = raw;
+          return;
+        }
+
+        const lower = raw.toLowerCase();
+        let cursor = 0;
+        let hit = lower.indexOf(keyword, cursor);
+        if (hit < 0) {
+          target.textContent = raw;
+          return;
+        }
+
+        while (hit >= 0) {
+          if (hit > cursor) {
+            target.appendChild(document.createTextNode(raw.slice(cursor, hit)));
+          }
+          const mark = document.createElement("mark");
+          mark.className = "search-hit";
+          mark.textContent = raw.slice(hit, hit + keyword.length);
+          target.appendChild(mark);
+          cursor = hit + keyword.length;
+          hit = lower.indexOf(keyword, cursor);
+        }
+
+        if (cursor < raw.length) {
+          target.appendChild(document.createTextNode(raw.slice(cursor)));
+        }
+      };
+
+      if (searchOpenButton) {
+        const hint = searchOpenButton.querySelector(".search-shortcut");
+        if (hint && isApple) {
+          hint.textContent = "Cmd K";
+        }
+      }
+
+      if (nav && navToggle) {
+        navToggle.addEventListener("click", () => {
+          const willOpen = !nav.classList.contains("is-open");
+          nav.classList.toggle("is-open", willOpen);
+          navToggle.setAttribute("aria-expanded", String(willOpen));
+        });
+      }
+
+      const closeDropdowns = (except = null) => {
+        dropdowns.forEach((dropdown) => {
+          if (dropdown === except) {
+            return;
+          }
+          dropdown.classList.remove("is-open");
+          const trigger = dropdown.querySelector("[data-dropdown-trigger]");
+          if (trigger) {
+            trigger.setAttribute("aria-expanded", "false");
+          }
+        });
+      };
+
+      dropdowns.forEach((dropdown) => {
+        const trigger = dropdown.querySelector("[data-dropdown-trigger]");
+        if (!trigger) {
+          return;
+        }
+        trigger.addEventListener("click", () => {
+          const willOpen = !dropdown.classList.contains("is-open");
+          closeDropdowns(dropdown);
+          dropdown.classList.toggle("is-open", willOpen);
+          trigger.setAttribute("aria-expanded", String(willOpen));
+        });
+      });
+
+      const setSelectedIndex = (nextIndex) => {
+        if (!searchResults || !searchState.items.length) {
+          searchState.selectedIndex = -1;
+          return;
+        }
+        searchState.selectedIndex = clampIndex(nextIndex, searchState.items.length);
+        const links = Array.from(searchResults.querySelectorAll("a"));
+        links.forEach((link, index) => {
+          const selected = index === searchState.selectedIndex;
+          link.classList.toggle("is-selected", selected);
+          link.setAttribute("aria-selected", selected ? "true" : "false");
+          if (selected) {
+            link.scrollIntoView({ block: "nearest" });
+          }
+        });
+      };
+
+      const renderSearchResults = (items, query, selectedIndex = 0) => {
+        if (!searchResults) {
+          return;
+        }
+
+        searchState.items = items;
+        searchState.query = query;
+        searchResults.innerHTML = "";
+        if (!items.length) {
+          searchState.selectedIndex = -1;
+          const empty = document.createElement("li");
+          empty.className = "search-empty";
+          empty.textContent = "没有匹配结果。";
+          searchResults.appendChild(empty);
+          return;
+        }
+        const resolvedIndex = Math.max(0, Math.min(selectedIndex, items.length - 1));
+        items.forEach((item, index) => {
+          const li = document.createElement("li");
+          const link = document.createElement("a");
+          const title = document.createElement("strong");
+          const desc = document.createElement("span");
+          const path = document.createElement("code");
+
+          link.href = item.url;
+          link.className = index === resolvedIndex ? "is-selected" : "";
+          link.setAttribute("aria-selected", index === resolvedIndex ? "true" : "false");
+          desc.className = "search-result-desc";
+
+          appendHighlightedText(title, item.title || item.url, query);
+          appendHighlightedText(desc, item.description || "打开文档页面", query);
+          appendHighlightedText(path, item.url, query);
+
+          link.appendChild(title);
+          link.appendChild(desc);
+          link.appendChild(path);
+          link.addEventListener("mouseenter", () => setSelectedIndex(index));
+          link.addEventListener("focus", () => setSelectedIndex(index));
+          link.addEventListener("click", () => closeSearch(false));
+          li.appendChild(link);
+          searchResults.appendChild(li);
+        });
+        searchState.selectedIndex = resolvedIndex;
+      };
+
+      const moveSelection = (delta) => {
+        if (!searchState.items.length) {
+          return;
+        }
+        setSelectedIndex(searchState.selectedIndex + delta);
+      };
+
+      const openSelectedResult = () => {
+        if (!searchState.items.length) {
+          return;
+        }
+        const index = searchState.selectedIndex >= 0 ? searchState.selectedIndex : 0;
+        const target = searchState.items[index];
+        if (target && target.url) {
+          window.location.href = target.url;
+        }
+      };
+
+      const defaultSearchItems = searchData
+        .filter((item) => item.url !== "/")
+        .slice(0, 8);
+
+      const querySearch = (rawText) => {
+        const text = rawText.trim().toLowerCase();
+        if (!text) {
+          return defaultSearchItems;
+        }
+        return searchData
+          .filter((item) => `${item.title} ${item.description} ${item.url}`.toLowerCase().includes(text))
+          .slice(0, 10);
+      };
+
+      const runSearch = (rawText) => {
+        const keyword = rawText.trim();
+        renderSearchResults(querySearch(rawText), keyword, 0);
+      };
+
+      const openSearch = () => {
+        if (!searchOverlay) {
+          return;
+        }
+        closeDropdowns();
+        if (nav && nav.classList.contains("is-open")) {
+          nav.classList.remove("is-open");
+          if (navToggle) {
+            navToggle.setAttribute("aria-expanded", "false");
+          }
+        }
+        renderSearchResults(defaultSearchItems, "", 0);
+        searchOverlay.hidden = false;
+        document.body.classList.add("search-open");
+        if (searchInput) {
+          searchInput.value = "";
+          requestAnimationFrame(() => searchInput.focus());
+        }
+      };
+
+      const closeSearch = (restoreFocus = true) => {
+        if (!searchOverlay) {
+          return;
+        }
+        searchOverlay.hidden = true;
+        document.body.classList.remove("search-open");
+        if (restoreFocus && searchOpenButton) {
+          searchOpenButton.focus();
+        }
+      };
+
+      if (searchOpenButton) {
+        searchOpenButton.addEventListener("click", openSearch);
+      }
+
+      if (searchCloseButton) {
+        searchCloseButton.addEventListener("click", closeSearch);
+      }
+
+      if (searchOverlay) {
+        searchOverlay.addEventListener("click", (event) => {
+          if (event.target === searchOverlay) {
+            closeSearch();
+          }
+        });
+      }
+
+      if (searchInput) {
+        searchInput.addEventListener("input", () => {
+          runSearch(searchInput.value);
+        });
+        searchInput.addEventListener("keydown", (event) => {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            moveSelection(1);
+            return;
+          }
+          if (event.key === "ArrowUp") {
+            event.preventDefault();
+            moveSelection(-1);
+            return;
+          }
+          if (event.key === "Enter") {
+            event.preventDefault();
+            openSelectedResult();
+          }
+        });
+      }
+
+      document.addEventListener("click", (event) => {
+        if (!event.target.closest(".main-nav")) {
+          closeDropdowns();
+        }
+        if (!event.target.closest(".topbar") && nav && nav.classList.contains("is-open")) {
+          nav.classList.remove("is-open");
+          if (navToggle) {
+            navToggle.setAttribute("aria-expanded", "false");
+          }
+        }
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+          event.preventDefault();
+          openSearch();
+          return;
+        }
+        if (event.key === "Escape") {
+          closeDropdowns();
+          closeSearch();
+          if (nav && nav.classList.contains("is-open")) {
+            nav.classList.remove("is-open");
+            if (navToggle) {
+              navToggle.setAttribute("aria-expanded", "false");
+            }
+          }
+        }
+      });
+
+      if (nav) {
+        nav.addEventListener("click", (event) => {
+          if (event.target.tagName === "A" && nav.classList.contains("is-open")) {
+            nav.classList.remove("is-open");
+            if (navToggle) {
+              navToggle.setAttribute("aria-expanded", "false");
+            }
+          }
+        });
+      }
+
+      const buildDocToc = () => {
+        if (!docContent || !docTocList) {
+          return;
+        }
+
+        const headings = Array.from(docContent.querySelectorAll("h2, h3"));
+        docTocList.innerHTML = "";
+
+        if (!headings.length) {
+          if (docTocEmpty) {
+            docTocEmpty.hidden = false;
+          }
+          return;
+        }
+
+        if (docTocEmpty) {
+          docTocEmpty.hidden = true;
+        }
+
+        const usedIds = new Set();
+        const ensureId = (heading, index) => {
+          if (heading.id) {
+            usedIds.add(heading.id);
+            return heading.id;
+          }
+          const rawText = (heading.textContent || "").trim().toLowerCase();
+          const base = rawText
+            .replace(/[^a-z0-9\u4e00-\u9fa5\s-]/g, "")
+            .replace(/\s+/g, "-")
+            .replace(/-+/g, "-")
+            .replace(/^-|-$/g, "") || `section-${index + 1}`;
+
+          let id = base;
+          let suffix = 2;
+          while (usedIds.has(id)) {
+            id = `${base}-${suffix}`;
+            suffix += 1;
+          }
+          heading.id = id;
+          usedIds.add(id);
+          return id;
+        };
+
+        const tocLinks = [];
+        headings.forEach((heading, index) => {
+          const id = ensureId(heading, index);
+          const li = document.createElement("li");
+          li.className = heading.tagName === "H3" ? "docs-toc-item level-3" : "docs-toc-item level-2";
+
+          const link = document.createElement("a");
+          link.href = `#${id}`;
+          link.textContent = (heading.textContent || "").trim() || `章节 ${index + 1}`;
+          link.dataset.target = id;
+          li.appendChild(link);
+          docTocList.appendChild(li);
+          tocLinks.push(link);
+        });
+
+        const setActive = (id) => {
+          tocLinks.forEach((link) => {
+            link.classList.toggle("is-active", link.dataset.target === id);
+          });
+        };
+
+        if (tocLinks.length) {
+          setActive(tocLinks[0].dataset.target);
+        }
+
+        if ("IntersectionObserver" in window) {
+          const observer = new IntersectionObserver(
+            (entries) => {
+              const visible = entries
+                .filter((entry) => entry.isIntersecting)
+                .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+              if (visible.length) {
+                setActive(visible[0].target.id);
+              }
+            },
+            {
+              root: null,
+              rootMargin: "-20% 0px -65% 0px",
+              threshold: [0, 1]
+            }
+          );
+          headings.forEach((heading) => observer.observe(heading));
+          return;
+        }
+
+        const onScroll = () => {
+          let current = headings[0].id;
+          headings.forEach((heading) => {
+            if (heading.getBoundingClientRect().top <= 120) {
+              current = heading.id;
+            }
+          });
+          setActive(current);
+        };
+        document.addEventListener("scroll", onScroll, { passive: true });
+      };
+
+      buildDocToc();
+    })();
+  </script>
+</body>
+</html>
