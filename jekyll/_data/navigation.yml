@@ -12,3 +12,6 @@
       url: /benchmark/
     - title: 参与贡献
       url: /contributing/
+- title: 项目链接
+  url: https://github.com/wzxzhuxi/Rain
+  external: true

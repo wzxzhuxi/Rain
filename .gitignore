@@ -34,3 +34,11 @@
 
 !jekyll/
 !jekyll/**
+
+# Ignore generated and local Jekyll artifacts
+jekyll/.bundle/
+jekyll/.jekyll-cache/
+jekyll/.sass-cache/
+jekyll/.jekyll-metadata
+jekyll/_site/
+jekyll/vendor/

@@ -3,16 +3,16 @@
 #
 # 前置:
 #   - wrk 已安装
-#   - Rain echo_bench 已编译
-#   - Tokio echo 已编译 (cargo build --release)
+#   - cmake -B build-release -DCMAKE_BUILD_TYPE=Release -DRAIN_BUILD_BENCHMARKS=ON && cmake --build build-release
+#   - cd benchmark/tokio_echo && cargo build --release
 
 set -e
 
 WRK_THREADS=4
-WRK_CONNS=100
-WRK_DURATION=10s
+WRK_CONNS=256
+WRK_DURATION=15s
 
-RAIN_BIN="./build/rain_echo_bench"
+RAIN_BIN="./build-release/rain_echo_bench"
 TOKIO_BIN="./benchmark/tokio_echo/target/release/tokio_echo"
 
 RAIN_PORT=7778
