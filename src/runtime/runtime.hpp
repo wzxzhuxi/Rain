@@ -73,10 +73,13 @@ public:
         (void)loop.run();
         g_thread_pool = nullptr;
 
+        auto result = handle.await_resume();
         if constexpr (std::same_as<T, Result<Unit>>) {
-            return handle.await_resume();
+            if (!result) {
+                return Err(std::move(result).error());
+            }
+            return std::move(*result);
         } else {
-            auto result = handle.await_resume();
             return std::move(*result);
         }
     }
