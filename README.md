@@ -75,7 +75,8 @@ src/
 ├── sync/       Channel、SpinLock
 ├── async/      Task、EventLoop、EpollReactor、时间轮、信号、组合子
 ├── runtime/    Runtime、Executor、ThreadPool、spawn_blocking 桥接
-└── net/        TcpListener、TcpStream、地址、I/O awaiter
+├── net/        TcpListener、TcpStream、地址、I/O awaiter
+└── fs/         thread-pool-backed 文件系统 API
 ```
 
 层级依赖严格自上而下：
@@ -85,7 +86,7 @@ Layer 0  core/       基础：类型别名、Result、概念
 Layer 1  sync/       同步原语：Channel、SpinLock
 Layer 2  async/      运行时核心：Task、EventLoop、epoll、定时器、信号
 Layer 3  runtime/    编排：Runtime、Executor、ThreadPool、Bridge
-Layer 4  net/        网络：TCP 监听器、流与 I/O awaiter
+Layer 4  net/ fs/    网络与文件系统：TCP I/O、blocking-pool 文件 I/O
 ```
 
 ## 快速开始
@@ -223,6 +224,8 @@ cmake --build build
 | `Runtime` | `src/runtime/runtime.hpp` | 统一运行时入口 |
 | `TcpListener` | `src/net/tcp_listener.hpp` | 异步 accept |
 | `TcpStream` | `src/net/tcp_stream.hpp` | 异步读写与 sendfile |
+| `fs::ops` | `src/fs/ops.hpp` | 基于 `spawn_blocking` 的路径级文件读写、metadata |
+| `fs::File` | `src/fs/file.hpp` | 基于 `pread/pwrite` 的偏移文件 I/O |
 
 ## 许可证
 

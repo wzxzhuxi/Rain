@@ -76,7 +76,8 @@ src/
 ├── sync/       Channel, SpinLock
 ├── async/      Task, EventLoop, EpollReactor, timer wheel, signal, combinators
 ├── runtime/    Runtime, Executor, ThreadPool, spawn_blocking bridge
-└── net/        TcpListener, TcpStream, address, I/O awaiters
+├── net/        TcpListener, TcpStream, address, I/O awaiters
+└── fs/         thread-pool-backed filesystem APIs
 ```
 
 Layer dependencies are strictly top-down:
@@ -86,7 +87,7 @@ Layer 0  core/       Foundation: type aliases, Result, concepts
 Layer 1  sync/       Primitives: Channel, SpinLock
 Layer 2  async/      Runtime core: Task, EventLoop, epoll, timers, signals
 Layer 3  runtime/    Orchestration: Runtime, Executor, ThreadPool, Bridge
-Layer 4  net/        Networking: TCP listener, stream, and I/O awaiters
+Layer 4  net/ fs/    Network and filesystem: TCP I/O, blocking-pool file I/O
 ```
 
 ## Quick Start
@@ -224,6 +225,8 @@ cmake --build build
 | `Runtime` | `src/runtime/runtime.hpp` | Unified runtime entry |
 | `TcpListener` | `src/net/tcp_listener.hpp` | Async accept |
 | `TcpStream` | `src/net/tcp_stream.hpp` | Async read/write and sendfile |
+| `fs::ops` | `src/fs/ops.hpp` | Path-based file read/write and metadata via `spawn_blocking` |
+| `fs::File` | `src/fs/file.hpp` | Offset file I/O backed by `pread/pwrite` |
 
 ## License
 

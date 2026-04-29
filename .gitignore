@@ -42,3 +42,10 @@ jekyll/.sass-cache/
 jekyll/.jekyll-metadata
 jekyll/_site/
 jekyll/vendor/
+
+# !manim_rain_tour/
+# !manim_rain_tour/**
+#
+# manim_rain_tour/html/
+# manim_rain_tour/md/
+# manim_rain_tour/py/
