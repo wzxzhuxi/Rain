@@ -5,6 +5,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace rain {
 
@@ -28,6 +29,8 @@ using f64 = double;
 
 using String = std::string;
 using StringView = std::string_view;
+
+using Bytes = std::vector<u8>;
 
 using ByteSpan = std::span<std::byte>;
 using ConstByteSpan = std::span<const std::byte>;
