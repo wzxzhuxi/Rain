@@ -20,6 +20,10 @@
 #include "runtime/executor.hpp"
 #include "runtime/runtime.hpp"
 
+#include "fs/file.hpp"
+#include "fs/metadata.hpp"
+#include "fs/ops.hpp"
+
 #include "net/address.hpp"
 #include "net/tcp_listener.hpp"
 #include "net/tcp_stream.hpp"
