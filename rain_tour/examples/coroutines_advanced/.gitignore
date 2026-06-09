@@ -1,0 +1,9 @@
+# Built example binary
+/echo_server
+
+# Local build/debug artifacts
+*.o
+*.d
+*.out
+core
+core.*
