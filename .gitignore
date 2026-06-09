@@ -43,9 +43,12 @@ jekyll/.jekyll-metadata
 jekyll/_site/
 jekyll/vendor/
 
-# !manim_rain_tour/
-# !manim_rain_tour/**
-#
-# manim_rain_tour/html/
-# manim_rain_tour/md/
-# manim_rain_tour/py/
+# Only the renamed tutorial examples (01/02/07) are tracked
+!rain_tour/
+!rain_tour/examples/
+!rain_tour/examples/process/
+!rain_tour/examples/process/**
+!rain_tour/examples/thread/
+!rain_tour/examples/thread/**
+!rain_tour/examples/coroutines_advanced/
+!rain_tour/examples/coroutines_advanced/**

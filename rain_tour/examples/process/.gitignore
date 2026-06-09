@@ -1,0 +1,9 @@
+# Built example binary
+/crash_supervisor
+
+# Local build/debug artifacts
+*.o
+*.d
+*.out
+core
+core.*

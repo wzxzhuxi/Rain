@@ -1,0 +1,9 @@
+# Built example binary
+/thread_pool_futures
+
+# Local build/debug artifacts
+*.o
+*.d
+*.out
+core
+core.*
