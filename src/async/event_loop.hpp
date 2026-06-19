@@ -84,7 +84,15 @@ public:
     // 允许移动构造用于工厂返回。run() 进行中严禁移动，
     // 否则线程局部指针会悬空。删除移动赋值以避免
     // 误替换正在运行的循环对象。
-    EventLoop(EventLoop&&) = default;
+    // cross_core_fd_ 是裸 fd，必须置空源对象，否则移动后两个析构会双重 close。
+    EventLoop(EventLoop&& other) noexcept
+        : reactor_(std::move(other.reactor_)), timer_(std::move(other.timer_)),
+          signals_(std::move(other.signals_)), owned_tasks_(std::move(other.owned_tasks_)),
+          ready_queue_(std::move(other.ready_queue_)), stop_source_(std::move(other.stop_source_)),
+          cross_core_fd_(std::exchange(other.cross_core_fd_, -1)),
+          cross_core_mutex_(std::move(other.cross_core_mutex_)),
+          cross_core_queue_(std::move(other.cross_core_queue_))
+    { }
     auto operator=(EventLoop&&) -> EventLoop& = delete;
 
     ~EventLoop()
@@ -199,8 +207,12 @@ public:
             // 2. 回收已完成任务
             cleanup_completed();
 
-            if (owned_tasks_.empty())
-                break;
+            // 退出前先排空跨核入队队列，否则并发 submit 的任务会被静默丢弃
+            if (owned_tasks_.empty()) {
+                drain_cross_core();
+                if (owned_tasks_.empty())
+                    break;
+            }
 
             // 3. 根据下一次定时器截止时间计算 poll 超时
             const auto now = Clock::now();
