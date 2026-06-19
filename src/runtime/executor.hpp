@@ -96,13 +96,19 @@ public:
 
         threads_.reserve(loops_.size());
 
+        // 先在主线程跑完所有 setup，再统一 spawn worker。setup 中的 add_signals
+        // 会在主线程屏蔽信号，而 worker 在创建时继承主线程掩码——全部 setup 先行
+        // 可确保每个 worker 都继承到所有已屏蔽信号，进程定向信号不会落到未屏蔽的
+        // worker 上绕过 signalfd（M4）。同时也避免某核 setup 失败时已有 worker 在跑。
         for (usize i = 0; i < loops_.size(); ++i) {
             auto setup_result = setup(loops_[i], i);
             if (!setup_result) {
                 stop_and_join();
                 return Err(std::move(setup_result).error());
             }
+        }
 
+        for (usize i = 0; i < loops_.size(); ++i) {
             threads_.emplace_back([this, i] {
                 if (thread_init_)
                     thread_init_(i);
