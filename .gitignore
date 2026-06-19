@@ -12,6 +12,11 @@
 !README.md
 !README_EN.md
 
+# CI 构建环境(本地与 GitHub 共用)
+!Dockerfile.ci
+!scripts/
+!scripts/*.sh
+
 # Allow source
 !src/
 !src/*/

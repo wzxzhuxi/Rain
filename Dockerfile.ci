@@ -1,0 +1,29 @@
+# Rain CI 构建环境 —— 本地与 GitHub Actions 共用同一镜像,杜绝「本机能过、CI 不行」。
+#
+# 基底与 GitHub `ubuntu-24.04` runner 一致;工具链由同一 apt 仓库提供。本地用
+# scripts/local-ci.sh 在此镜像里跑,CI 也在此镜像里跑同一个 scripts/ci.sh ——
+# 环境「按定义一致」,不再靠运气。
+#
+# fuzz 用 clang-19 而非 ubuntu 默认的 clang 18:Clang 18 把 __cpp_concepts 报成旧值
+# 201907L,GCC 14 的 libstdc++ 据此把 std::expected 等 C++23 设施门控掉;Clang 19 起
+# 报 202002L 才正常。libclang-rt-19-dev 提供 libFuzzer/ASan 等运行时静态库(链接需要)。
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake \
+        g++-14 \
+        clang-19 \
+        libclang-rt-19-dev \
+        make \
+        wrk \
+        git \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 用默认的 Unix Makefiles 生成器(已装 make),与 GitHub runner 一致。
+# 不用 Ninja:CMake 3.28 + Ninja + C++23 会触发 C++20 模块依赖扫描(需 clang-scan-deps),
+# 本项目无模块,徒增依赖且会让所有编译检查失败。
+WORKDIR /w

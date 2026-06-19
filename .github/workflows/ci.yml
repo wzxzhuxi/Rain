@@ -5,84 +5,27 @@ on:
     branches: [main, master]
   pull_request:
   schedule:
-    - cron: '0 7 * * *'   # 每日夜间：跑加重的浸泡测试
+    - cron: '0 7 * * *'   # 每日夜间:加重浸泡
   workflow_dispatch:
 
-# 注意：ubuntu-24.04 自带 CMake 3.28(2023-11)早于 Clang 18 / GCC 14,无法把
-# CMAKE_CXX_STANDARD=23 映射到这些较新编译器的 -std=c++23,会回退到默认 gnu++17,
-# 导致 std::expected 不可见。故所有 job 都用 get-cmake 取新版 CMake。
+# 容器化构建:每个 job 都在 Dockerfile.ci 构建出的同一镜像里跑 scripts/ci.sh。
+# 本地用 scripts/local-ci.sh 跑的是同一镜像、同一脚本——「本地能过」⟺「CI 能过」
+# 由构造保证,不再有「本机能过、CI 不行」。
 
 jobs:
-  test:
-    name: ${{ matrix.name }}
+  ci:
+    name: ${{ matrix.variant }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { name: debug,      sanitize: "" }
-          - { name: asan+ubsan, sanitize: "address+undefined" }
-          - { name: tsan,       sanitize: "thread" }
+        variant: [debug, asan, tsan, fuzz, bench]
     steps:
       - uses: actions/checkout@v4
-      - uses: lukka/get-cmake@latest
-      - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y g++-14
-      - name: Configure
-        run: >
-          cmake -B build
-          -DCMAKE_CXX_COMPILER=g++-14
-          -DRAIN_BUILD_TESTS=ON
-          -DRAIN_SANITIZE=${{ matrix.sanitize }}
-      - name: Build
-        run: cmake --build build -j
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
-        env:
-          ASAN_OPTIONS: detect_leaks=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-          TSAN_OPTIONS: halt_on_error=1
-
-  benchmark:
-    name: benchmark-floor
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: lukka/get-cmake@latest
-      - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y g++-14 wrk
-      - name: Build (Release)
-        run: |
-          cmake -B build-rel -DCMAKE_BUILD_TYPE=Release -DRAIN_BUILD_BENCHMARKS=ON -DCMAKE_CXX_COMPILER=g++-14
-          cmake --build build-rel -j
-      - name: wrk floor check
-        run: |
-          ./build-rel/rain_echo_bench &
-          SRV=$!
-          sleep 1
-          OUT=$(wrk -t2 -c64 -d8s http://127.0.0.1:7778/) || true
-          kill "$SRV" 2>/dev/null || true
-          echo "$OUT"
-          RPS=$(echo "$OUT" | awk '/Requests\/sec/ {print $2}')
-          echo "Requests/sec: ${RPS:-0}"
-          # 生成性下限：只拦截灾难性退化(挂死/崩溃/数量级回归),不追究百分比噪声。
-          awk -v r="${RPS:-0}" 'BEGIN { if (r+0 < 10000) { print "BELOW FLOOR (10000 req/s)"; exit 1 } }'
-
-  fuzz:
-    name: fuzz-address
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: lukka/get-cmake@latest
-      - name: Install toolchain
-        # g++-14 一并装上,让 Clang 使用完整的 libstdc++14
-        run: sudo apt-get update && sudo apt-get install -y clang g++-14
-      - name: Build fuzzer
-        run: |
-          cmake -B build-fuzz -DRAIN_BUILD_FUZZERS=ON -DCMAKE_CXX_COMPILER=clang++
-          cmake --build build-fuzz -j
-      - name: Fuzz (60s)
-        run: ./build-fuzz/rain_address_fuzz -max_total_time=60 -timeout=10
+      - name: Build CI image
+        run: docker build -f Dockerfile.ci -t rain-ci .
+      - name: Run ${{ matrix.variant }}
+        run: docker run --rm -v "$PWD":/w -w /w rain-ci bash scripts/ci.sh ${{ matrix.variant }}
 
   soak-nightly:
     name: soak-nightly
@@ -90,15 +33,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: lukka/get-cmake@latest
-      - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y g++-14
-      - name: Build (TSan)
-        run: |
-          cmake -B build-soak -DRAIN_BUILD_TESTS=ON -DRAIN_SANITIZE=thread -DCMAKE_CXX_COMPILER=g++-14
-          cmake --build build-soak -j
+      - name: Build CI image
+        run: docker build -f Dockerfile.ci -t rain-ci .
       - name: Heavy soak under TSan
-        run: ctest --test-dir build-soak -R soak --output-on-failure
-        env:
-          RAIN_SOAK_ITERS: "8000"
-          TSAN_OPTIONS: halt_on_error=1
+        run: docker run --rm -e RAIN_SOAK_ITERS=8000 -v "$PWD":/w -w /w rain-ci bash scripts/ci.sh soak
