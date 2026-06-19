@@ -4,6 +4,13 @@ project(Rain LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# 兜底:某些「CMake 版本早于编译器版本」的组合(如 Ubuntu CMake 3.28 + Clang 18)
+# 无法把 CMAKE_CXX_STANDARD=23 映射成 -std,会回退到编译器默认的 C++17,导致
+# std::expected 等 C++23 库设施不可见。显式补一个 -std=c++23 兜底——已正确下发
+# 时只是无害的重复,生效的仍是 c++23。
+add_compile_options(-std=c++23)
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ── Core header-only library ──────────────────────────────────────
