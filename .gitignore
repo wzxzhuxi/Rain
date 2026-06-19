@@ -20,6 +20,7 @@
 # Allow tests
 !test/
 !test/*.cpp
+!test/*.hpp
 
 # Allow benchmarks
 !benchmark/
@@ -52,3 +53,6 @@ jekyll/vendor/
 !rain_tour/examples/thread/**
 !rain_tour/examples/coroutines_advanced/
 !rain_tour/examples/coroutines_advanced/**
+
+# Keep the tour overview out — only the examples ship
+rain_tour/README.md
