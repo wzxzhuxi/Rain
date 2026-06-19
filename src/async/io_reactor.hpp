@@ -142,24 +142,22 @@ public:
             if (it == pending_.end())
                 continue;
 
-            auto entry = it->second;
-            pending_.erase(it);
+            auto& e = it->second;
+            const bool err = (ep & (EPOLLERR | EPOLLHUP)) != 0;
 
-            (void)ep;
-            if (entry.state) {
-                if (*entry.state != WaitState::Pending) {
-                    continue;
-                }
-                *entry.state = entry.completion;
+            // 错误/挂断唤醒两个方向；否则按 EPOLLIN/EPOLLOUT 分派到对应等待者。
+            if (e.read && ((ep & EPOLLIN) || err)) {
+                if (fire(*e.read))
+                    ++completed;
+                e.read.reset();
             }
-            if (entry.result) {
-                *entry.result = Ok(usize { 0 });
+            if (e.write && ((ep & EPOLLOUT) || err)) {
+                if (fire(*e.write))
+                    ++completed;
+                e.write.reset();
             }
 
-            if (entry.handle) {
-                ready_.push_back(entry.handle);
-                ++completed;
-            }
+            (void)rearm_or_erase(fd, it);
         }
 
         return Ok(completed);
@@ -185,18 +183,22 @@ public:
                                      .message = "register_read: negative fd",
                                      .location = std::source_location::current() });
         }
-        if (pending_.contains(fd)) {
+        auto& e = pending_[fd];
+        if (e.read) {
             return Err(SystemError { .code = std::make_error_code(std::errc::device_or_resource_busy),
-                                     .message = "register_read: fd already pending",
+                                     .message = "register_read: read already pending on fd",
                                      .location = std::source_location::current() });
         }
+        e.read = PendingEntry { .handle = h, .result = result_ptr, .state = state, .completion = completion };
 
-        pending_.emplace(fd,
-                         PendingEntry { .handle = h, .result = result_ptr, .state = state, .completion = completion });
-
-        auto ensure_result = ensure(fd, IoEvent::Read | IoEvent::EdgeTrig | IoEvent::OneShot);
+        IoEvent interest = IoEvent::Read | IoEvent::EdgeTrig | IoEvent::OneShot;
+        if (e.write)
+            interest = interest | IoEvent::Write;
+        auto ensure_result = ensure(fd, interest);
         if (!ensure_result) {
-            pending_.erase(fd);
+            e.read.reset();
+            if (!e.write)
+                pending_.erase(fd);
             return Err(std::move(ensure_result).error());
         }
         return Ok();
@@ -222,18 +224,22 @@ public:
                                      .message = "register_write: negative fd",
                                      .location = std::source_location::current() });
         }
-        if (pending_.contains(fd)) {
+        auto& e = pending_[fd];
+        if (e.write) {
             return Err(SystemError { .code = std::make_error_code(std::errc::device_or_resource_busy),
-                                     .message = "register_write: fd already pending",
+                                     .message = "register_write: write already pending on fd",
                                      .location = std::source_location::current() });
         }
+        e.write = PendingEntry { .handle = h, .result = result_ptr, .state = state, .completion = completion };
 
-        pending_.emplace(fd,
-                         PendingEntry { .handle = h, .result = result_ptr, .state = state, .completion = completion });
-
-        auto ensure_result = ensure(fd, IoEvent::Write | IoEvent::EdgeTrig | IoEvent::OneShot);
+        IoEvent interest = IoEvent::Write | IoEvent::EdgeTrig | IoEvent::OneShot;
+        if (e.read)
+            interest = interest | IoEvent::Read;
+        auto ensure_result = ensure(fd, interest);
         if (!ensure_result) {
-            pending_.erase(fd);
+            e.write.reset();
+            if (!e.read)
+                pending_.erase(fd);
             return Err(std::move(ensure_result).error());
         }
         return Ok();
@@ -243,6 +249,19 @@ public:
     {
         pending_.erase(fd);
         return unit;
+    }
+
+    // 仅注销指定方向；若另一方向仍挂起则重新武装，否则移除 fd。
+    auto deregister(i32 fd, IoEvent dir) -> Unit
+    {
+        auto it = pending_.find(fd);
+        if (it == pending_.end())
+            return unit;
+        if (has_flag(dir, IoEvent::Read))
+            it->second.read.reset();
+        if (has_flag(dir, IoEvent::Write))
+            it->second.write.reset();
+        return rearm_or_erase(fd, it);
     }
 
     [[nodiscard]] auto drain_ready() -> std::vector<std::coroutine_handle<>> { return std::exchange(ready_, { }); }
@@ -277,6 +296,45 @@ private:
         WaitState completion = WaitState::Ready;
     };
 
+    // 每个 fd 可同时挂起一个读等待者和一个写等待者，从而支持全双工。
+    struct FdEntry {
+        std::optional<PendingEntry> read;
+        std::optional<PendingEntry> write;
+    };
+
+    // 触发一个方向：处理与定时器的 state 竞争、写结果、入队句柄。返回是否入队。
+    auto fire(const PendingEntry& entry) -> bool
+    {
+        if (entry.state) {
+            if (*entry.state != WaitState::Pending)
+                return false;
+            *entry.state = entry.completion;
+        }
+        if (entry.result)
+            *entry.result = Ok(usize { 0 });
+        if (entry.handle) {
+            ready_.push_back(entry.handle);
+            return true;
+        }
+        return false;
+    }
+
+    // 按仍挂起的方向重新武装 fd（EPOLLONESHOT 每次事件后失效），无挂起则移除。
+    auto rearm_or_erase(i32 fd, std::unordered_map<i32, FdEntry>::iterator it) -> Unit
+    {
+        if (!it->second.read && !it->second.write) {
+            pending_.erase(it);
+            return unit;
+        }
+        IoEvent interest = IoEvent::EdgeTrig | IoEvent::OneShot;
+        if (it->second.read)
+            interest = interest | IoEvent::Read;
+        if (it->second.write)
+            interest = interest | IoEvent::Write;
+        (void)ensure(fd, interest);
+        return unit;
+    }
+
     explicit EpollReactor(i32 epoll_fd) : epoll_fd_(epoll_fd), events_(kMaxEventsPerPoll) { }
 
     [[nodiscard]] auto ensure(i32 fd, IoEvent events) -> Result<Unit>
@@ -299,7 +357,7 @@ private:
 
     i32 epoll_fd_ = -1;
     std::vector<epoll_event> events_;
-    std::unordered_map<i32, PendingEntry> pending_;
+    std::unordered_map<i32, FdEntry> pending_;
     std::vector<std::coroutine_handle<>> ready_;
 };
 
