@@ -82,11 +82,13 @@ public:
     }
 
     // 即发即弃——适用于调用方不需要结果的任务。
+    // 非阻塞入队：队列满时返回 Err 而非阻塞。spawn_blocking 在事件循环线程上
+    // 调用此函数，阻塞会冻结整个核心，故必须用 try_send 把背压暴露为错误。
     template<typename F>
         requires std::invocable<F>
     [[nodiscard]] auto spawn(F&& f) -> Result<Unit>
     {
-        return tasks_.send(std::forward<F>(f));
+        return tasks_.try_send(std::forward<F>(f));
     }
 
     auto shutdown() -> Unit
