@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <algorithm>
 #include <cstring>
 #include <format>
 
@@ -83,7 +84,10 @@ public:
     [[nodiscard]] static auto from_raw(const struct sockaddr_storage& raw,
                                         socklen_t len) -> SocketAddress {
         SocketAddress addr;
-        std::memcpy(&addr.storage_, &raw, static_cast<usize>(len));
+        // 夹紧到 storage_ 大小：内核给的 addrlen 在 AF_UNIX 长路径下可超过 128，
+        // 不夹紧会同时越界读 raw、越界写 storage_。
+        const usize n = std::min(static_cast<usize>(len), sizeof(addr.storage_));
+        std::memcpy(&addr.storage_, &raw, n);
         return addr;
     }
 

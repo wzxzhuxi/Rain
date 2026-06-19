@@ -5,11 +5,10 @@
 
 #include "async/concepts.hpp"
 
-#include <algorithm>
 #include <array>
 #include <coroutine>
 #include <optional>
-#include <unordered_set>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -28,7 +27,7 @@ struct TimerEntry {
 // --- 层级 ---
 
 struct Level {
-    std::vector<std::vector<TimerEntry>> slots;
+    std::vector<std::vector<TimerId>> slots;
     usize current_slot = 0;
 
     Level() = default;
@@ -96,10 +95,11 @@ public:
         return id;
     }
 
+    // 立即从条目表删除——O(1) 急切取消，不再留墓碑。槽位中残留的 id
+    // 在扫描时查不到条目即跳过，因此也不会再解引用已销毁的 state 指针。
     [[nodiscard]] auto cancel(TimerId id) -> bool
     {
-        auto [_, inserted] = cancelled_.insert(id);
-        return inserted;
+        return entries_.erase(id) > 0;
     }
 
     [[nodiscard]] auto tick() -> u32
@@ -122,9 +122,10 @@ public:
         const auto& level0 = levels_[0];
         for (usize i = 0; i < level0.slot_count(); ++i) {
             const usize slot = (level0.current_slot + i) % level0.slot_count();
-            for (const auto& entry : level0.slots[slot]) {
-                if (!cancelled_.contains(entry.id)) {
-                    return entry.deadline;
+            for (const auto id : level0.slots[slot]) {
+                auto it = entries_.find(id);
+                if (it != entries_.end()) {
+                    return it->second.deadline;
                 }
             }
         }
@@ -133,18 +134,17 @@ public:
             const auto& level = levels_[lvl];
             for (usize i = 0; i < level.slot_count(); ++i) {
                 const usize slot = (level.current_slot + i) % level.slot_count();
-                if (!level.slots[slot].empty()) {
-                    std::optional<TimePoint> earliest;
-                    for (const auto& entry : level.slots[slot]) {
-                        if (!cancelled_.contains(entry.id)) {
-                            if (!earliest || entry.deadline < *earliest) {
-                                earliest = entry.deadline;
-                            }
+                std::optional<TimePoint> earliest;
+                for (const auto id : level.slots[slot]) {
+                    auto it = entries_.find(id);
+                    if (it != entries_.end()) {
+                        if (!earliest || it->second.deadline < *earliest) {
+                            earliest = it->second.deadline;
                         }
                     }
-                    if (earliest)
-                        return earliest;
                 }
+                if (earliest)
+                    return earliest;
             }
         }
 
@@ -156,33 +156,40 @@ public:
     [[nodiscard]] auto current_time() const noexcept -> TimePoint { return current_time_; }
 
 private:
-    auto insert_entry(TimerEntry entry) -> Unit
+    // 按 deadline 的绝对 tick 位段把 id 放入对应层级的槽位（各层 current_slot 同样是
+    // 绝对时间位段），否则级联下放时相位不对齐，会导致定时器晚触发整整一圈。
+    auto place(TimerId id, TimePoint deadline) -> Unit
     {
         using namespace std::chrono;
-        const auto delay = entry.deadline - current_time_;
-        auto ticks = duration_cast<milliseconds>(delay).count();
+        auto delay = duration_cast<milliseconds>(deadline - current_time_).count();
+        if (delay < 0)
+            delay = 0;
+        const auto diff = static_cast<u64>(delay);
 
-        if (ticks < 0)
-            ticks = 0;
+        auto abs = duration_cast<milliseconds>(deadline - start_time_).count();
+        if (abs < 0)
+            abs = 0;
+        const auto dticks = static_cast<u64>(abs);
 
-        const auto uticks = static_cast<u64>(ticks);
-
-        if (uticks < kLevel1Threshold) {
-            const usize slot = (levels_[0].current_slot + static_cast<usize>(uticks)) % kLevel0Size;
-            levels_[0].slots[slot].push_back(std::move(entry));
-        } else if (uticks < kLevel2Threshold) {
-            const usize idx = static_cast<usize>(uticks >> kLevel0Bits);
-            const usize slot = (levels_[1].current_slot + idx) % kLevelNSize;
-            levels_[1].slots[slot].push_back(std::move(entry));
-        } else if (uticks < kLevel3Threshold) {
-            const usize idx = static_cast<usize>(uticks >> (kLevel0Bits + kLevelNBits));
-            const usize slot = (levels_[2].current_slot + idx) % kLevelNSize;
-            levels_[2].slots[slot].push_back(std::move(entry));
+        if (diff < kLevel1Threshold) {
+            levels_[0].slots[dticks & (kLevel0Size - 1)].push_back(id);
+        } else if (diff < kLevel2Threshold) {
+            levels_[1].slots[(dticks >> kLevel0Bits) & (kLevelNSize - 1)].push_back(id);
+        } else if (diff < kLevel3Threshold) {
+            levels_[2].slots[(dticks >> (kLevel0Bits + kLevelNBits)) & (kLevelNSize - 1)].push_back(id);
         } else {
-            const usize idx = static_cast<usize>(uticks >> (kLevel0Bits + 2 * kLevelNBits));
-            const usize slot = (levels_[3].current_slot + std::min(idx, kLevelNSize - 1)) % kLevelNSize;
-            levels_[3].slots[slot].push_back(std::move(entry));
+            levels_[3].slots[(dticks >> (kLevel0Bits + 2 * kLevelNBits)) & (kLevelNSize - 1)].push_back(id);
         }
+        return unit;
+    }
+
+    // 存储条目（条目表是唯一真相），并把其 id 放入槽位。
+    auto insert_entry(TimerEntry entry) -> Unit
+    {
+        const auto id = entry.id;
+        const auto deadline = entry.deadline;
+        entries_.insert_or_assign(id, entry);
+        place(id, deadline);
         return unit;
     }
 
@@ -192,16 +199,18 @@ private:
             cascade(1);
         }
 
-        auto& slot = levels_[0].slots[levels_[0].current_slot];
+        auto slot = std::exchange(levels_[0].slots[levels_[0].current_slot], { });
         u32 fired = 0;
 
-        for (auto& entry : slot) {
-            if (cancelled_.contains(entry.id)) {
-                cancelled_.erase(entry.id);
-                continue;
+        for (const auto id : slot) {
+            auto it = entries_.find(id);
+            if (it == entries_.end()) {
+                continue; // 已取消或已触发
             }
+            auto& entry = it->second;
             if (entry.state) {
                 if (*entry.state != WaitState::Pending) {
+                    entries_.erase(it);
                     continue;
                 }
                 *entry.state = entry.completion;
@@ -210,8 +219,8 @@ private:
                 ready_.push_back(entry.handle);
                 ++fired;
             }
+            entries_.erase(it);
         }
-        slot.clear();
 
         levels_[0].current_slot = (levels_[0].current_slot + 1) % kLevel0Size;
         return fired;
@@ -226,13 +235,13 @@ private:
             cascade(level + 1);
         }
 
-        auto entries = std::exchange(levels_[level].slots[levels_[level].current_slot], { });
-        for (auto& entry : entries) {
-            if (cancelled_.contains(entry.id)) {
-                cancelled_.erase(entry.id);
-                continue;
+        auto ids = std::exchange(levels_[level].slots[levels_[level].current_slot], { });
+        for (const auto id : ids) {
+            auto it = entries_.find(id);
+            if (it == entries_.end()) {
+                continue; // 已取消
             }
-            insert_entry(std::move(entry));
+            place(id, it->second.deadline);
         }
 
         levels_[level].current_slot = (levels_[level].current_slot + 1) % levels_[level].slot_count();
@@ -243,7 +252,7 @@ private:
     TimePoint start_time_;
     TimePoint current_time_;
     u64 next_id_ = 1;
-    std::unordered_set<TimerId> cancelled_;
+    std::unordered_map<TimerId, TimerEntry> entries_;
     std::vector<std::coroutine_handle<>> ready_;
 };
 

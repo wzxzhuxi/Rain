@@ -10,6 +10,7 @@
 #include "runtime/thread_pool.hpp"
 
 #include <memory>
+#include <optional>
 
 namespace rain::runtime {
 
@@ -18,6 +19,19 @@ namespace rain::runtime {
 // 无需手动传递 ThreadPool 引用。
 
 inline thread_local ThreadPool* g_thread_pool = nullptr;
+
+namespace detail {
+
+// 在协程帧被事件循环回收前，把结果搬到调用方栈上的存储里，
+// 避免 block_on 在 run() 销毁帧之后读取 promise（use-after-free）。
+template<typename T>
+inline auto capture_into(std::optional<Result<T>>& out, async::JoinHandle<T> handle) -> async::Task<Unit>
+{
+    out = co_await std::move(handle);
+    co_return unit;
+}
+
+} // namespace detail
 
 // ── 运行时（Runtime）────────────────────────────────────────────────
 // 通用异步运行时底座。统一持有 Executor（异步任务）和 ThreadPool
@@ -59,27 +73,32 @@ public:
     {
         auto loop_result = async::EventLoop::create();
         if (!loop_result) {
-            if constexpr (std::same_as<T, Result<Unit>>) {
-                return Err(std::move(loop_result).error());
+            if constexpr (async::detail::is_result<T>::value) {
+                return T(Err(std::move(loop_result).error()));
             } else {
-                std::abort();
+                std::abort(); // 非 Result 任务无错误通道，无法传播创建失败
             }
         }
 
         auto& loop = *loop_result;
         auto handle = loop.spawn_with_handle(std::move(task));
+        std::optional<Result<T>> slot;
+        loop.spawn(detail::capture_into(slot, std::move(handle)));
 
         g_thread_pool = pool_ ? &*pool_ : nullptr;
         (void)loop.run();
         g_thread_pool = nullptr;
 
-        auto result = handle.await_resume();
-        if constexpr (std::same_as<T, Result<Unit>>) {
+        auto result = std::move(slot).value_or(Err(async::make_cancelled_error()));
+        if constexpr (async::detail::is_result<T>::value) {
             if (!result) {
-                return Err(std::move(result).error());
+                return T(Err(std::move(result).error()));
             }
             return std::move(*result);
         } else {
+            if (!result) {
+                std::abort(); // 未完成/被取消，非 Result 任务无法返回有效值
+            }
             return std::move(*result);
         }
     }

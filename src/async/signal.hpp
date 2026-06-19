@@ -30,9 +30,12 @@ struct SignalInfo {
     }
 };
 
-// ── SignalSet——RAII 封装 signalfd + sigprocmask ────────────────────
-// 构造：通过 sigprocmask 屏蔽信号并创建 signalfd。
+// ── SignalSet——RAII 封装 signalfd + pthread_sigmask ────────────────
+// 构造：通过 pthread_sigmask 屏蔽信号并创建 signalfd。
 // 析构：关闭 signalfd，并恢复原始信号掩码。
+// pthread_sigmask 只影响调用线程；多核下由 Executor::run 先在主线程跑完所有
+// setup（含 add_signals 的屏蔽）再 spawn worker，使每个 worker 都继承屏蔽掩码，
+// 避免进程定向信号落到未屏蔽的 worker 上绕过 signalfd（M4）。
 
 class SignalSet {
 public:
@@ -72,13 +75,13 @@ public:
         }
 
         sigset_t old_mask { };
-        if (::sigprocmask(SIG_BLOCK, &mask, &old_mask) < 0) {
+        if (::pthread_sigmask(SIG_BLOCK, &mask, &old_mask) < 0) {
             return Err(SystemError::from_errno());
         }
 
         const i32 fd = ::signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
         if (fd < 0) {
-            ::sigprocmask(SIG_SETMASK, &old_mask, nullptr);
+            ::pthread_sigmask(SIG_SETMASK, &old_mask, nullptr);
             return Err(SystemError::from_errno());
         }
 
@@ -116,7 +119,7 @@ public:
         }
         fd_ = -1;
 
-        if (::sigprocmask(SIG_SETMASK, &old_mask_, nullptr) < 0 && !first_error.has_value()) {
+        if (::pthread_sigmask(SIG_SETMASK, &old_mask_, nullptr) < 0 && !first_error.has_value()) {
             first_error = SystemError::from_errno();
         }
 

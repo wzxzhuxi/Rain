@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    - cron: '0 7 * * *'   # 每日夜间：跑加重的浸泡测试
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: debug,      sanitize: "" }
+          - { name: asan+ubsan, sanitize: "address+undefined" }
+          - { name: tsan,       sanitize: "thread" }
+          # Clang 提供不同的协程 codegen，可作为后续矩阵项加入：
+          # - { name: clang-asan, sanitize: "address+undefined", cxx: clang++-18 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y cmake g++-14
+      - name: Configure
+        run: >
+          cmake -B build
+          -DCMAKE_CXX_COMPILER=g++-14
+          -DRAIN_BUILD_TESTS=ON
+          -DRAIN_SANITIZE=${{ matrix.sanitize }}
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          TSAN_OPTIONS: halt_on_error=1
+
+  benchmark:
+    name: benchmark-floor
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y cmake g++-14 wrk
+      - name: Build (Release)
+        run: |
+          cmake -B build-rel -DCMAKE_BUILD_TYPE=Release -DRAIN_BUILD_BENCHMARKS=ON -DCMAKE_CXX_COMPILER=g++-14
+          cmake --build build-rel -j
+      - name: wrk floor check
+        run: |
+          ./build-rel/rain_echo_bench &
+          SRV=$!
+          sleep 1
+          OUT=$(wrk -t2 -c64 -d8s http://127.0.0.1:7778/) || true
+          kill "$SRV" 2>/dev/null || true
+          echo "$OUT"
+          RPS=$(echo "$OUT" | awk '/Requests\/sec/ {print $2}')
+          echo "Requests/sec: ${RPS:-0}"
+          # 生成性的下限：只拦截灾难性退化（挂死/崩溃/数量级回归），不追究百分比噪声。
+          awk -v r="${RPS:-0}" 'BEGIN { if (r+0 < 10000) { print "BELOW FLOOR (10000 req/s)"; exit 1 } }'
+
+  fuzz:
+    name: fuzz-address
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y cmake clang
+      - name: Build fuzzer
+        run: |
+          cmake -B build-fuzz -DRAIN_BUILD_FUZZERS=ON -DCMAKE_CXX_COMPILER=clang++
+          cmake --build build-fuzz -j
+      - name: Fuzz (60s)
+        run: ./build-fuzz/rain_address_fuzz -max_total_time=60 -timeout=10
+
+  soak-nightly:
+    name: soak-nightly
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y cmake g++-14
+      - name: Build (TSan)
+        run: |
+          cmake -B build-soak -DRAIN_BUILD_TESTS=ON -DRAIN_SANITIZE=thread -DCMAKE_CXX_COMPILER=g++-14
+          cmake --build build-soak -j
+      - name: Heavy soak under TSan
+        run: ctest --test-dir build-soak -R soak --output-on-failure
+        env:
+          RAIN_SOAK_ITERS: "8000"
+          TSAN_OPTIONS: halt_on_error=1

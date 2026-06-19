@@ -7,6 +7,7 @@
 #include "async/timer.hpp"
 
 #include <coroutine>
+#include <sys/socket.h>
 #include <utility>
 
 namespace rain::net {
@@ -54,9 +55,12 @@ private:
                                                  .location = std::source_location::current() });
 };
 
+// 就绪等待器对 reactor 类型泛化（CTAD 推导）：生产路径推导出 EpollReactor、生成
+// 与原先逐字节相同的代码；测试可传入满足 IoReactorLike 的 SimReactor 做确定性仿真。
+template<typename R>
 class ReadReadyAwaiter {
 public:
-    ReadReadyAwaiter(async::EpollReactor& reactor, i32 fd) : reactor_(reactor), fd_(fd) { }
+    ReadReadyAwaiter(R& reactor, i32 fd) : reactor_(reactor), fd_(fd) { }
 
     [[nodiscard]] auto await_ready() noexcept -> bool { return false; }
 
@@ -79,16 +83,17 @@ public:
     }
 
 private:
-    async::EpollReactor& reactor_;
+    R& reactor_;
     i32 fd_;
     Result<usize> readiness_ = Err(SystemError { .code = std::make_error_code(std::errc::operation_canceled),
                                                  .message = "read readiness not completed",
                                                  .location = std::source_location::current() });
 };
 
+template<typename R>
 class WriteReadyAwaiter {
 public:
-    WriteReadyAwaiter(async::EpollReactor& reactor, i32 fd) : reactor_(reactor), fd_(fd) { }
+    WriteReadyAwaiter(R& reactor, i32 fd) : reactor_(reactor), fd_(fd) { }
 
     [[nodiscard]] auto await_ready() noexcept -> bool { return false; }
 
@@ -111,7 +116,7 @@ public:
     }
 
 private:
-    async::EpollReactor& reactor_;
+    R& reactor_;
     i32 fd_;
     Result<usize> readiness_ = Err(SystemError { .code = std::make_error_code(std::errc::operation_canceled),
                                                  .message = "write readiness not completed",
@@ -157,7 +162,8 @@ public:
     [[nodiscard]] auto await_resume() -> Result<Unit>
     {
         if (state_ == async::WaitState::TimedOut) {
-            reactor_.deregister(fd_);
+            reactor_.deregister(fd_,
+                                direction_ == Direction::Read ? async::IoEvent::Read : async::IoEvent::Write);
             return Err(SystemError { .code = std::make_error_code(std::errc::timed_out),
                                      .message = direction_ == Direction::Read ? "read timeout" : "write timeout",
                                      .location = std::source_location::current() });

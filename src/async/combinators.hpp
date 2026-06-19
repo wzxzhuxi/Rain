@@ -203,31 +203,68 @@ template<typename T, typename F>
 }
 
 // ── 全部等待（when_all）──────────────────────────────────────────────
-// 并发执行所有任务：先全部 spawn 到 EventLoop，再逐个等待结果。
-// 所有任务同时进入 ready_queue，由 EventLoop 交替驱动。
+// 并发执行所有任务：全部 spawn 到 EventLoop，各 racer 把结果写入按下标
+// 定位的共享存储，全部完成后唤醒等待者。
+
+namespace detail {
+
+template<typename T>
+struct WhenAllState {
+    usize remaining = 0;
+    std::vector<Result<T>> results;
+    std::coroutine_handle<> waiter { };
+};
+
+template<typename T>
+[[nodiscard]] auto when_all_racer(usize idx, Task<Result<T>> task, Shared<WhenAllState<T>> state)
+    -> Task<Unit>
+{
+    state->results[idx] = co_await std::move(task);
+    if (--state->remaining == 0 && state->waiter && g_event_loop) {
+        g_event_loop->notify(state->waiter);
+    }
+    co_return unit;
+}
+
+template<typename T>
+class WhenAllAwaiter {
+public:
+    explicit WhenAllAwaiter(Shared<WhenAllState<T>> state) : state_(std::move(state)) { }
+
+    [[nodiscard]] auto await_ready() const noexcept -> bool { return state_->remaining == 0; }
+
+    auto await_suspend(std::coroutine_handle<> h) noexcept -> bool
+    {
+        state_->waiter = h;
+        return state_->remaining != 0;
+    }
+
+    [[nodiscard]] auto await_resume() -> std::vector<Result<T>> { return std::move(state_->results); }
+
+private:
+    Shared<WhenAllState<T>> state_;
+};
+
+} // namespace detail
 
 template<typename T>
 [[nodiscard]] auto when_all(std::vector<Task<Result<T>>> tasks)
     -> Task<std::vector<Result<T>>>
 {
-    std::vector<JoinHandle<Result<T>>> handles;
-    handles.reserve(tasks.size());
+    auto state = std::make_shared<detail::WhenAllState<T>>();
+    state->remaining = tasks.size();
+    state->results.reserve(tasks.size());
+    for (usize i = 0; i < tasks.size(); ++i) {
+        state->results.emplace_back(Err(make_cancelled_error()));
+    }
+
+    // 即发即弃：racer 归事件循环所有，不持有 JoinHandle，避免读取已被回收的协程帧（UAF）。
+    usize idx = 0;
     for (auto& task : tasks) {
-        handles.push_back(g_event_loop->spawn_with_handle(std::move(task)));
+        g_event_loop->spawn(detail::when_all_racer(idx++, std::move(task), state));
     }
 
-    std::vector<Result<T>> results;
-    results.reserve(handles.size());
-    for (auto& handle : handles) {
-        auto join_result = co_await std::move(handle);
-        if (!join_result) {
-            results.push_back(Err(std::move(join_result).error()));
-        } else {
-            results.push_back(std::move(*join_result));
-        }
-    }
-
-    co_return std::move(results);
+    co_return co_await detail::WhenAllAwaiter<T>(state);
 }
 
 // ── 任一完成（when_any）─────────────────────────────────────────────
@@ -239,6 +276,7 @@ namespace detail {
 template<typename T>
 struct WhenAnyState {
     bool resolved = false;
+    usize remaining = 0;
     Result<T> result = Err(make_cancelled_error());
     std::coroutine_handle<> waiter { };
 };
@@ -248,7 +286,9 @@ template<typename T>
     -> Task<Unit>
 {
     auto r = co_await std::move(task);
-    if (!state->resolved && r) {
+    // 首个成功者胜出；若全部失败，则最后一个完成者带着错误唤醒等待者，避免永久挂起。
+    const bool last = (--state->remaining == 0);
+    if (!state->resolved && (r || last)) {
         state->resolved = true;
         state->result = std::move(r);
         if (state->waiter && g_event_loop) {
@@ -291,19 +331,16 @@ template<typename T>
     }
 
     auto state = std::make_shared<detail::WhenAnyState<T>>();
+    state->remaining = tasks.size();
 
-    std::vector<JoinHandle<Unit>> handles;
-    handles.reserve(tasks.size());
+    // 即发即弃：racer 归事件循环所有，落败者在自然完成时回收。
+    // 不持有 JoinHandle——对已完成（帧已销毁）的 racer 调用 request_stop 是 UAF，
+    // 且协作式取消下无 awaiter 读取 stop_token，该调用本就无效。
     for (auto& task : tasks) {
-        handles.push_back(
-            g_event_loop->spawn_with_handle(detail::when_any_racer(std::move(task), state)));
+        g_event_loop->spawn(detail::when_any_racer(std::move(task), state));
     }
 
     co_await detail::WhenAnyAwaiter<T>(state);
-
-    for (auto& h : handles) {
-        h.request_stop();
-    }
 
     co_return std::move(state->result);
 }
