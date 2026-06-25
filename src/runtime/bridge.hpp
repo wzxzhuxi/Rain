@@ -10,6 +10,7 @@
 
 #include <concepts>
 #include <coroutine>
+#include <memory>
 #include <sys/eventfd.h>
 #include <type_traits>
 #include <unistd.h>
@@ -117,14 +118,23 @@ private:
 //   4. reactor 被唤醒并恢复协程
 //   5. await_resume 读取结果
 //
-// 该 awaiter 持有 CrossThreadNotifier 和结果存储。
-// 它位于协程帧（栈）中，因此其成员指针在挂起/恢复边界内保持有效。
+// 共享状态：把 worker 要写的 result + 要敲的 eventfd 搬出协程帧，放进 refcounted holder。
+// awaiter（帧）与 worker 闭包各持一份 shared_ptr → 二者生命周期解耦。即便协程帧在 worker
+// 写回前被销毁（如 loop 中途 teardown），worker 仍写进存活的共享状态、eventfd 仍有效 → 无 UAF。
+template<typename T>
+struct BlockingState {
+    explicit BlockingState(CrossThreadNotifier n) : notifier(std::move(n)) { }
+    CrossThreadNotifier notifier;
+    Result<T> result = Err(SystemError { .code = std::make_error_code(std::errc::operation_canceled),
+                                         .message = "blocking task not completed",
+                                         .location = std::source_location::current() });
+};
 
 template<typename T>
 class BlockingAwaiter {
 public:
     BlockingAwaiter(async::EpollReactor& reactor, ThreadPool& pool, CrossThreadNotifier notifier)
-        : reactor_(reactor), pool_(pool), notifier_(std::move(notifier))
+        : reactor_(reactor), pool_(pool), state_(std::make_shared<BlockingState<T>>(std::move(notifier)))
     { }
 
     [[nodiscard]] auto await_ready() noexcept -> bool { return false; }
@@ -132,22 +142,23 @@ public:
     template<typename F>
     auto set_work(F&& fn) -> Unit
     {
-        work_ = [this, f = std::forward<F>(fn)]() mutable {
+        // 捕获 shared_ptr 副本（而非 raw this）：worker 写的是共享状态，与协程帧解耦。
+        work_ = [state = state_, f = std::forward<F>(fn)]() mutable {
             try {
                 if constexpr (std::same_as<T, Unit>) {
                     f();
-                    result_ = Ok(unit);
+                    state->result = Ok(unit);
                 } else {
-                    result_ = Ok(T(f()));
+                    state->result = Ok(T(f()));
                 }
             } catch (...) {
-                result_ = Err(SystemError { .code = std::make_error_code(std::errc::operation_not_permitted),
-                                            .message = "exception in spawn_blocking task",
-                                            .location = std::source_location::current() });
+                state->result = Err(SystemError { .code = std::make_error_code(std::errc::operation_not_permitted),
+                                                  .message = "exception in spawn_blocking task",
+                                                  .location = std::source_location::current() });
             }
-            // 唤醒 EventLoop 线程
-            if (auto notify_result = notifier_.notify(); !notify_result && result_) {
-                result_ = Err(std::move(notify_result).error());
+            // 唤醒 EventLoop 线程（eventfd 在共享状态里，帧已销毁也仍有效）
+            if (auto notify_result = state->notifier.notify(); !notify_result && state->result) {
+                state->result = Err(std::move(notify_result).error());
             }
         };
         return unit;
@@ -156,9 +167,9 @@ public:
     auto await_suspend(std::coroutine_handle<> h) -> bool
     {
         // 向 reactor 注册 eventfd，仅监听就绪（无缓冲区）
-        auto reg = reactor_.register_read(notifier_.fd(), h, nullptr, 0, &readiness_);
+        auto reg = reactor_.register_read(state_->notifier.fd(), h, nullptr, 0, &readiness_);
         if (!reg) {
-            result_ = Err(std::move(reg).error());
+            state_->result = Err(std::move(reg).error());
             return false; // 不挂起，await_resume 直接读取错误
         }
 
@@ -166,8 +177,8 @@ public:
         auto spawn_result = pool_.spawn(std::move(work_));
         if (!spawn_result) {
             // 线程池已关闭：取消注册并且不挂起
-            reactor_.deregister(notifier_.fd());
-            result_ = Err(std::move(spawn_result).error());
+            reactor_.deregister(state_->notifier.fd());
+            state_->result = Err(std::move(spawn_result).error());
             return false;
         }
         return true;
@@ -176,29 +187,26 @@ public:
     [[nodiscard]] auto await_resume() -> Result<T>
     {
         // 确认 eventfd（消费通知）
-        auto ack_result = notifier_.acknowledge();
+        auto ack_result = state_->notifier.acknowledge();
         if (!ack_result) {
-            reactor_.deregister(notifier_.fd());
+            reactor_.deregister(state_->notifier.fd());
             return Err(std::move(ack_result).error());
         }
 
         // 从 reactor 取消注册
-        reactor_.deregister(notifier_.fd());
+        reactor_.deregister(state_->notifier.fd());
 
-        return std::move(result_);
+        return std::move(state_->result);
     }
 
 private:
     async::EpollReactor& reactor_;
     ThreadPool& pool_;
-    CrossThreadNotifier notifier_;
+    std::shared_ptr<BlockingState<T>> state_; // result + notifier，与帧解耦
     std::move_only_function<void()> work_;
     Result<usize> readiness_ = Err(SystemError { .code = std::make_error_code(std::errc::operation_canceled),
                                                  .message = "blocking task not completed",
                                                  .location = std::source_location::current() });
-    Result<T> result_ = Err(SystemError { .code = std::make_error_code(std::errc::operation_canceled),
-                                          .message = "blocking task not completed",
-                                          .location = std::source_location::current() });
 };
 
 // ── 阻塞任务桥接（spawn_blocking）────────────────────────────────────
@@ -210,10 +218,12 @@ private:
 //       return expensive_computation();
 //   });
 
+// 返回类型用 ResultT（把 void 映射成 Unit）：否则 F 返回 void 时 Task<Result<void>> 与
+// co_return 的 Result<Unit> 不匹配，void 副作用卸载会编译失败（pre-existing，void 路径从未实例化）。
 template<typename F>
     requires std::invocable<F>
-[[nodiscard]] auto spawn_blocking(async::EpollReactor& reactor, ThreadPool& pool, F&& fn)
-    -> async::Task<Result<std::invoke_result_t<F>>>
+[[nodiscard]] auto spawn_blocking(async::EpollReactor& reactor, ThreadPool& pool, F&& fn) -> async::Task<
+    Result<std::conditional_t<std::is_void_v<std::invoke_result_t<F>>, Unit, std::invoke_result_t<F>>>>
 {
     using T = std::invoke_result_t<F>;
     using ResultT = std::conditional_t<std::same_as<T, void>, Unit, T>;

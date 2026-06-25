@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/diagnostics.hpp"
 #include "core/result.hpp"
 #include "core/types.hpp"
 
@@ -85,9 +86,21 @@ public:
         std::optional<Result<T>> slot;
         loop.spawn(detail::capture_into(slot, std::move(handle)));
 
+        // 单线程路径也安装每核诊断计数器，否则 block_on / 单元测试 / 脚本完全失明。
+        diag::CoreMetrics metrics;
+        diag::g_metrics = &metrics;
+        diag::MetricsRegistry::instance().add(&metrics);
         g_thread_pool = pool_ ? &*pool_ : nullptr;
-        (void)loop.run();
+        auto run_result = loop.run();
         g_thread_pool = nullptr;
+        if (!run_result) {
+            diag::count(&diag::CoreMetrics::loop_run_errors);
+            diag::emit({ .code = "block_on.run_failed",
+                         .severity = diag::Severity::Error,
+                         .error = &run_result.error() });
+        }
+        diag::MetricsRegistry::instance().remove(&metrics);
+        diag::g_metrics = nullptr;
 
         auto result = std::move(slot).value_or(Err(async::make_cancelled_error()));
         if constexpr (async::detail::is_result<T>::value) {
@@ -134,12 +147,19 @@ public:
 
     auto stop() -> Unit { return executor_.stop(); }
 
-    auto join() -> Unit { return executor_.join(); }
+    // 优雅停机：停 accept、在途 drain；deadline 兜底硬停。见 Executor::graceful_stop。
+    auto request_graceful_stop() -> Unit { return executor_.request_graceful_stop(); }
+    [[nodiscard]] auto graceful_stop(async::Duration deadline) -> Result<Unit>
+    {
+        return executor_.graceful_stop(deadline);
+    }
+
+    [[nodiscard]] auto join() -> Result<Unit> { return executor_.join(); }
 
     auto stop_and_join() -> Unit
     {
         stop();
-        join();
+        (void)join();
         return unit;
     }
 
@@ -224,7 +244,8 @@ template<typename T>
 
 template<typename F>
     requires std::invocable<F>
-[[nodiscard]] auto spawn_blocking(F&& fn) -> async::Task<Result<std::invoke_result_t<F>>>
+[[nodiscard]] auto spawn_blocking(F&& fn) -> async::Task<
+    Result<std::conditional_t<std::is_void_v<std::invoke_result_t<F>>, Unit, std::invoke_result_t<F>>>>
 {
     return ::rain::runtime::spawn_blocking(*async::g_reactor, *g_thread_pool, std::forward<F>(fn));
 }

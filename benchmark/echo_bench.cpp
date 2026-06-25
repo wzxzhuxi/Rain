@@ -105,6 +105,6 @@ auto main() -> int
     }
 
     std::printf("rain echo benchmark :%d (%zu cores)\n", kPort, cores);
-    rt->join();
+    (void)rt->join();
     return 0;
 }

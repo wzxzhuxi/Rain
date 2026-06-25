@@ -88,7 +88,8 @@ public:
     EventLoop(EventLoop&& other) noexcept
         : reactor_(std::move(other.reactor_)), timer_(std::move(other.timer_)),
           signals_(std::move(other.signals_)), owned_tasks_(std::move(other.owned_tasks_)),
-          ready_queue_(std::move(other.ready_queue_)), stop_source_(std::move(other.stop_source_)),
+          ready_queue_(std::move(other.ready_queue_)), resume_scratch_(std::move(other.resume_scratch_)),
+          stop_source_(std::move(other.stop_source_)), graceful_source_(std::move(other.graceful_source_)),
           cross_core_fd_(std::exchange(other.cross_core_fd_, -1)),
           cross_core_mutex_(std::move(other.cross_core_mutex_)),
           cross_core_queue_(std::move(other.cross_core_queue_))
@@ -170,6 +171,16 @@ public:
         return JoinHandle<T>(handle);
     }
 
+    // -- 服务循环 Spawn（优雅停机时取消）--------------------------------
+    // 给"长生命周期服务循环"（如 accept loop）用：注入本核的优雅停机令牌，request_graceful_stop()
+    // 时其挂起的 accept/IO 被抢占式取消 → 循环退出。普通 spawn() 不注入令牌，停机时自然 drain 跑完。
+    template<typename T>
+    auto spawn_service(Task<T> task) -> Unit
+    {
+        task.set_cancellation(graceful_source_.get_token());
+        return spawn(std::move(task));
+    }
+
     // -- 跨核任务提交（线程安全）-----------------------------------------
     // 允许任意线程将任务提交到此 EventLoop。
     // 任务入队后通过 eventfd 唤醒目标核心的 epoll_wait。
@@ -198,10 +209,12 @@ public:
         ThreadLocalGuard guard(reactor_, timer_, *this);
 
         while (!stop_source_.stop_requested()) {
-            // 1. 恢复所有就绪协程
-            auto ready = std::exchange(ready_queue_, { });
+            // 1. 恢复所有就绪协程：swap 到复用的 scratch（而非 exchange 出一个空 vector），
+            //    避免每轮丢弃 ready_queue_ 的容量、下一轮再 realloc。
+            resume_scratch_.clear();
+            std::swap(resume_scratch_, ready_queue_);
             std::ranges::for_each(
-                ready | std::views::filter([](auto h) { return h && !h.done(); }),
+                resume_scratch_ | std::views::filter([](auto h) { return h && !h.done(); }),
                 [](auto h) { h.resume(); });
 
             // 2. 回收已完成任务
@@ -233,14 +246,12 @@ public:
                 return Err(std::move(poll_result).error());
             }
 
-            // 5. 取出 reactor 就绪的协程句柄
-            auto reactor_ready = reactor_.drain_ready();
-            ready_queue_.insert(ready_queue_.end(), reactor_ready.begin(), reactor_ready.end());
+            // 5. 取出 reactor 就绪的协程句柄（直接追加，复用 reactor 内部 ready_ 容量）
+            reactor_.drain_ready_into(ready_queue_);
 
             // 6. 推进定时器并取出就绪句柄
             (void)timer_.advance_to(Clock::now());
-            auto timer_ready = timer_.drain_ready();
-            ready_queue_.insert(ready_queue_.end(), timer_ready.begin(), timer_ready.end());
+            timer_.drain_ready_into(ready_queue_);
 
             // 7. 排空跨核任务队列
             drain_cross_core();
@@ -263,6 +274,28 @@ public:
     auto request_stop() -> Unit
     {
         stop_source_.request_stop();
+        // 写 eventfd 唤醒可能阻塞在 epoll_wait 的 owner 核，使停止即时生效（否则要等一个 poll 超时）。
+        // 跨核安全：request_stop 可由任意线程调用（如 FailFast 从故障 worker 停所有核）。
+        if (cross_core_fd_ >= 0) {
+            const u64 val = 1;
+            (void)::write(cross_core_fd_, &val, sizeof(val));
+        }
+        return unit;
+    }
+
+    // 优雅停机令牌：服务循环（spawn_service）持有它，request_graceful_stop() 触发后其 accept/IO
+    // 被抢占式取消、循环退出；在途请求（普通 spawn）继续跑完，run() 经 owned_tasks_ 空判断自然退出。
+    [[nodiscard]] auto shutdown_token() -> std::stop_token { return graceful_source_.get_token(); }
+
+    // 请求优雅停机（停 accept，不硬停 run()）。停机不立即 break，让在途 drain；超时兜底由上层
+    // （Executor::graceful_stop）在 deadline 后再调 request_stop() 硬停残留。跨核安全。
+    auto request_graceful_stop() -> Unit
+    {
+        graceful_source_.request_stop(); // 触发服务循环退出
+        if (cross_core_fd_ >= 0) {
+            const u64 val = 1;
+            (void)::write(cross_core_fd_, &val, sizeof(val)); // 唤醒 owner 核，让取消回调即时跑
+        }
         return unit;
     }
 
@@ -323,10 +356,15 @@ private:
     std::optional<SignalSet> signals_;
     std::vector<OwnedTask> owned_tasks_;
     std::vector<std::coroutine_handle<>> ready_queue_;
+    std::vector<std::coroutine_handle<>> resume_scratch_; // run() 复用的 resume 暂存，避免每轮丢容量
     std::stop_source stop_source_;
+    std::stop_source graceful_source_; // 优雅停机令牌源（spawn_service 注入给服务循环）
 
-    // 跨核任务提交
-    i32 cross_core_fd_ = -1;
+    // 跨核任务提交字段：alignas 到独立 cacheline，避免任意线程的 submit（改 cross_core_queue_
+    // 控制块、写 eventfd）与 owner 核锁外热路径（ready_queue_/owned_tasks_）发生伪共享。
+    // 该对齐同时把 alignof(EventLoop) 抬到 64，使 vector<EventLoop> 中各核的循环对象也各自
+    // 落在 cacheline 边界，互不伪共享。
+    alignas(64) i32 cross_core_fd_ = -1;
     Box<std::mutex> cross_core_mutex_ = std::make_unique<std::mutex>();
     std::vector<OwnedTask> cross_core_queue_;
 };

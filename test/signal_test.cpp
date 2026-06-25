@@ -49,7 +49,7 @@ auto main() -> int
     }
 
     (void)::kill(::getpid(), SIGUSR1);
-    rt->join(); // core1 处理信号后 request_stop -> worker 退出 -> join 返回（无需 sleep）
+    (void)rt->join(); // core1 处理信号后 request_stop -> worker 退出 -> join 返回（无需 sleep）
 
     TK_CHECK(ctx, handled.load());
     return ctx.summary();

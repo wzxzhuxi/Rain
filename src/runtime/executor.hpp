@@ -1,11 +1,17 @@
 #pragma once
 
+#include "core/diagnostics.hpp"
 #include "core/result.hpp"
 #include "core/types.hpp"
 
 #include "async/event_loop.hpp"
 
+#include <atomic>
+#include <chrono>
+#include <deque>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <signal.h>
 #include <thread>
 #include <vector>
@@ -32,6 +38,18 @@ public:
     using SetupFn = std::move_only_function<Result<Unit>(async::EventLoop&, usize core_id)>;
     using ThreadInitFn = std::function<void(usize core_id)>;
     using TeardownFn = std::function<void(usize core_id)>;
+
+    // core 失败策略：一个 worker 的 run() 返回 Err 时怎么办。
+    enum class FaultPolicy {
+        FailFast, // 一核死即对所有 loop request_stop，让整个 Executor 停机（默认）
+        LogOnly,  // 仅经 diag seam 上报并计数，其余核继续
+    };
+
+    auto fault_policy(FaultPolicy p) -> Executor&
+    {
+        policy_ = p;
+        return *this;
+    }
 
     Executor(const Executor&) = delete;
     auto operator=(const Executor&) -> Executor& = delete;
@@ -108,20 +126,44 @@ public:
             }
         }
 
+        // 每核诊断计数器：deque（CoreMetrics 含 atomic 不可移动，不能用会重分配的 vector）。
+        metrics_.resize(loops_.size());
+
         for (usize i = 0; i < loops_.size(); ++i) {
             threads_.emplace_back([this, i] {
+                diag::g_metrics = &metrics_[i];
+                diag::MetricsRegistry::instance().add(&metrics_[i]);
                 if (thread_init_)
                     thread_init_(i);
-                (void)loops_[i].run();
+
+                auto run_result = loops_[i].run();
+                if (!run_result) {
+                    diag::count(&diag::CoreMetrics::loop_run_errors);
+                    diag::emit({ .code = "loop.run_failed",
+                                 .severity = diag::Severity::Error,
+                                 .error = &run_result.error() });
+                    {
+                        std::lock_guard lk(*faults_mu_);
+                        faults_.push_back(std::move(run_result).error());
+                    }
+                    if (policy_ == FaultPolicy::FailFast) {
+                        // 静默死核 = 它的 SO_REUSEPORT accept 队列没人收 → 停掉所有核（request_stop 跨核安全）
+                        for (auto& l : loops_)
+                            l.request_stop();
+                    }
+                }
+
                 if (teardown_)
                     teardown_(i);
+                diag::MetricsRegistry::instance().remove(&metrics_[i]);
+                diag::g_metrics = nullptr;
             });
         }
 
         return Ok();
     }
 
-    // 请求所有 EventLoop 停止（非阻塞）。
+    // 请求所有 EventLoop 停止（非阻塞，硬停——在途任务被直接撕断）。
     auto stop() -> Unit
     {
         for (auto& loop : loops_) {
@@ -130,8 +172,38 @@ public:
         return unit;
     }
 
-    // 等待所有线程结束。
-    auto join() -> Unit
+    // 请求所有 EventLoop 优雅停机（非阻塞）：停 accept、服务循环退出，在途任务继续 drain。
+    auto request_graceful_stop() -> Unit
+    {
+        for (auto& loop : loops_) {
+            loop.request_graceful_stop();
+        }
+        return unit;
+    }
+
+    // 优雅停机 + 带 deadline 的兜底：停 accept → 等在途 drain；deadline 内未 drain 完则硬停残留。
+    // 返回各核 run() 故障（若有）。watchdog 线程在 deadline 后硬停；drain 提前完成则立即收回 watchdog。
+    [[nodiscard]] auto graceful_stop(async::Duration deadline) -> Result<Unit>
+    {
+        request_graceful_stop();
+        std::atomic<bool> drained { false };
+        std::thread watchdog([this, deadline, &drained] {
+            const auto end = std::chrono::steady_clock::now() + deadline;
+            while (std::chrono::steady_clock::now() < end) {
+                if (drained.load(std::memory_order_acquire))
+                    return; // 已 drain，无需硬停
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            stop(); // deadline 到 → 硬停残留在途
+        });
+        auto result = join(); // 等所有 worker drain（或被 watchdog 硬停）退出
+        drained.store(true, std::memory_order_release);
+        watchdog.join();
+        return result;
+    }
+
+    // 等待所有线程结束。返回首个 core 的 run() 故障（若有）——让『退出码必须被看见』成为类型契约。
+    [[nodiscard]] auto join() -> Result<Unit>
     {
         for (auto& t : threads_) {
             if (t.joinable()) {
@@ -139,14 +211,22 @@ public:
             }
         }
         threads_.clear();
-        return unit;
+        // 被移动后的 Executor 残壳 faults_mu_ 为 null（其析构会经 stop_and_join 走到这里）——守卫之。
+        if (faults_mu_) {
+            std::lock_guard lk(*faults_mu_);
+            if (!faults_.empty()) {
+                auto err = faults_.front();
+                return Err(std::move(err));
+            }
+        }
+        return Ok();
     }
 
-    // 停止并 join。
+    // 停止并 join（清理路径，丢弃故障——析构上下文无处传播）。
     auto stop_and_join() -> Unit
     {
         stop();
-        join();
+        (void)join();
         return unit;
     }
 
@@ -175,6 +255,10 @@ private:
     std::vector<std::jthread> threads_;
     ThreadInitFn thread_init_;
     TeardownFn teardown_;
+    std::deque<diag::CoreMetrics> metrics_; // 每核诊断计数器（deque：元素含 atomic 不可移动，但 deque 自身可移动）
+    Box<std::mutex> faults_mu_ = std::make_unique<std::mutex>(); // Box：mutex 不可移动，装箱以保 Executor 可移动
+    std::vector<SystemError> faults_;       // 各核 run() 故障（冷路径，仅故障时写）
+    FaultPolicy policy_ = FaultPolicy::FailFast;
 };
 
 } // namespace rain::runtime
