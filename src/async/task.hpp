@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/diagnostics.hpp"
 #include "core/result.hpp"
 #include "core/types.hpp"
 
@@ -67,9 +68,33 @@ public:
     struct promise_type {
         Result<T> result_ = Err(make_cancelled_error());
         std::coroutine_handle<> continuation_ { };
-        std::stop_source stop_source_ { };
+        // 本帧自有的 stop-state（区别于下面传播进来的 cancel_token_）：惰性 nostopstate 默认
+        // 构造不分配控制块，仅 Task::request_stop()/stop_token() 显式使用时才创建。抢占式取消
+        // 走的是 cancel_token_（由 timeout/when_any 注入、await_transform 向下传播、叶子挂
+        // stop_callback），不依赖此 stop_source_，故此字段仍极少分配，保住惰性快路径。
+        // 前提：取消为 owner 核驱动——stop_callback 在 request_stop 的调用线程同步执行，会触碰
+        // reactor/timer（非线程安全），跨核 request_stop 需调用方避免。
+        std::stop_source stop_source_ { std::nostopstate };
+
+        // 取消令牌沿 co_await 链向下传播：本帧收到的取消令牌（默认空）。由取消根
+        // （timeout/when_any/JoinHandle）经 Task::set_cancellation 注入；await_transform 把它
+        // 透传给被 co_await 的子帧 / IO awaiter，叶子据此挂 stop_callback 实现抢占式取消。
+        std::stop_token cancel_token_ {};
 
         auto get_return_object() -> Task { return Task { handle_type::from_promise(*this) }; }
+
+        // 拦截本帧所有 co_await：若被等待者支持取消（有 set_cancellation 成员）且本帧持有有效
+        // 取消令牌，则把令牌注入它，使取消沿链向下传播；否则恒等透传——关闭路径（token 空）为
+        // 纯 no-op，不改变任何现有 co_await 语义、零分配。
+        template<typename A>
+        auto await_transform(A&& a) -> A&&
+        {
+            if constexpr (requires { a.set_cancellation(cancel_token_); }) {
+                if (cancel_token_.stop_possible())
+                    a.set_cancellation(cancel_token_);
+            }
+            return std::forward<A>(a);
+        }
 
         auto initial_suspend() noexcept -> std::suspend_always { return { }; }
 
@@ -98,17 +123,31 @@ public:
 
         void unhandled_exception()
         {
+            diag::count(&diag::CoreMetrics::coroutine_exceptions);
             result_ = Err(SystemError { .code = std::make_error_code(std::errc::operation_not_permitted),
                                         .message = "unhandled exception",
                                         .location = std::source_location::current() });
         }
 
-        [[nodiscard]] auto stop_token() const -> std::stop_token { return stop_source_.get_token(); }
+        [[nodiscard]] auto stop_token() -> std::stop_token
+        {
+            ensure_stop_state();
+            return stop_source_.get_token();
+        }
 
         auto request_stop() -> Unit
         {
+            ensure_stop_state();
             stop_source_.request_stop();
             return unit;
+        }
+
+        // 惰性创建 stop-state：仅在首次真正需要取消能力时分配。nostopstate 的
+        // stop_possible() 为 false，据此判断尚未分配；已分配（含已请求停止）则为 true。
+        auto ensure_stop_state() -> void
+        {
+            if (!stop_source_.stop_possible())
+                stop_source_ = std::stop_source { };
         }
     };
 
@@ -188,6 +227,15 @@ public:
             return handle_.promise().stop_token();
         }
         return { };
+    }
+
+    // 注入外部取消令牌：取消根（timeout/when_any/JoinHandle）在本 Task 开跑前调用，
+    // 令牌经本帧 promise 的 await_transform 沿 co_await 链向下传播到叶子 IO awaiter。
+    auto set_cancellation(std::stop_token token) -> void
+    {
+        if (handle_) {
+            handle_.promise().cancel_token_ = std::move(token);
+        }
     }
 
     // -- 句柄访问（供 JoinHandle 使用）------------------------------------

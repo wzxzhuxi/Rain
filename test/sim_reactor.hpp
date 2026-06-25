@@ -98,6 +98,21 @@ public:
         return Ok();
     }
 
+    // 仅注销指定方向（镜像 EpollReactor::deregister(fd, dir)，供取消路径 cancel_io_wait 使用）。
+    auto deregister(i32 fd, async::IoEvent dir) -> Unit
+    {
+        auto it = pending_.find(fd);
+        if (it == pending_.end())
+            return unit;
+        if (async::has_flag(dir, async::IoEvent::Read))
+            it->second.read.reset();
+        if (async::has_flag(dir, async::IoEvent::Write))
+            it->second.write.reset();
+        if (!it->second.read && !it->second.write)
+            pending_.erase(it);
+        return unit;
+    }
+
     auto deregister(i32 fd) -> Unit
     {
         pending_.erase(fd);

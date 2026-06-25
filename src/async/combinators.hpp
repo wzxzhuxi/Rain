@@ -7,6 +7,7 @@
 #include "core/result.hpp"
 
 #include <memory>
+#include <stop_token>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -279,6 +280,7 @@ struct WhenAnyState {
     usize remaining = 0;
     Result<T> result = Err(make_cancelled_error());
     std::coroutine_handle<> waiter { };
+    std::vector<std::shared_ptr<std::stop_source>> sources; // 各 racer 取消源（refcounted，与帧解耦 → 取消败者无 UAF）
 };
 
 template<typename T>
@@ -291,6 +293,10 @@ template<typename T>
     if (!state->resolved && (r || last)) {
         state->resolved = true;
         state->result = std::move(r);
+        // 抢占式取消所有 racer：败者（仍挂在 I/O 上）被唤醒并以 cancelled 收尾、回收帧；
+        // 胜者/已完成者的 stop_callback 已注销，request_stop 为 no-op。owner 核同步执行。
+        for (auto& s : state->sources)
+            s->request_stop();
         if (state->waiter && g_event_loop) {
             g_event_loop->notify(state->waiter);
         }
@@ -332,16 +338,106 @@ template<typename T>
 
     auto state = std::make_shared<detail::WhenAnyState<T>>();
     state->remaining = tasks.size();
+    state->sources.reserve(tasks.size());
 
-    // 即发即弃：racer 归事件循环所有，落败者在自然完成时回收。
-    // 不持有 JoinHandle——对已完成（帧已销毁）的 racer 调用 request_stop 是 UAF，
-    // 且协作式取消下无 awaiter 读取 stop_token，该调用本就无效。
+    // 即发即弃：racer 归事件循环所有，落败者被抢占式取消、在收尾时回收帧。
+    // 取消源用 shared_ptr<stop_source>（与帧解耦、refcounted）：胜者 resolve 时 request_stop
+    // 所有源，败者的叶子 stop_callback 据此 deregister + 唤醒，对已完成帧无 UAF。
     for (auto& task : tasks) {
+        auto src = std::make_shared<std::stop_source>();
+        task.set_cancellation(src->get_token());
+        state->sources.push_back(std::move(src));
         g_event_loop->spawn(detail::when_any_racer(std::move(task), state));
     }
 
     co_await detail::WhenAnyAwaiter<T>(state);
 
+    co_return std::move(state->result);
+}
+
+// ── 抢占式超时（timeout）─────────────────────────────────────────────
+// 把 task 与一个『睡 dur 的哨兵』赛跑，第一个**完成**者胜出（成功/失败/取消都算完成，
+// 与 when_any『首个成功』语义不同）。胜者取消败者：task 先完成 → 取消哨兵的 sleep；
+// 哨兵先睡满 → 抢占式取消 task 的在途 I/O（经 stop_callback → deregister + 唤醒）。
+// 取消源用 shared_ptr<stop_source>，与协程帧解耦、refcounted，彻底避免对已完成帧的 UAF。
+
+namespace detail {
+
+template<typename T>
+struct TimeoutState {
+    bool resolved = false;
+    Result<T> result = Err(make_cancelled_error());
+    std::coroutine_handle<> waiter { };
+};
+
+template<typename T>
+[[nodiscard]] inline auto timeout_task_racer(
+    Task<Result<T>> task, Shared<TimeoutState<T>> state, std::shared_ptr<std::stop_source> timer_src) -> Task<Unit>
+{
+    auto r = co_await std::move(task);
+    if (!state->resolved) {
+        state->resolved = true;
+        state->result = std::move(r);
+        if (timer_src)
+            timer_src->request_stop(); // task 先完成 → 取消哨兵的 sleep，避免悬挂 timer
+        if (state->waiter && g_event_loop)
+            g_event_loop->notify(state->waiter);
+    }
+    co_return unit;
+}
+
+template<typename T>
+[[nodiscard]] inline auto timeout_timer_racer(
+    Duration dur, Shared<TimeoutState<T>> state, std::shared_ptr<std::stop_source> task_src) -> Task<Unit>
+{
+    auto slept = co_await sleep_for(*g_timer, dur);
+    if (!slept)
+        co_return unit; // sleep 被取消（task 先赢）→ 哨兵退场
+    if (!state->resolved) {
+        state->resolved = true;
+        state->result = Err(make_timed_out_error());
+        if (task_src)
+            task_src->request_stop(); // 哨兵睡满 → 抢占取消 task 的在途 I/O
+        if (state->waiter && g_event_loop)
+            g_event_loop->notify(state->waiter);
+    }
+    co_return unit;
+}
+
+template<typename T>
+class TimeoutAwaiter {
+public:
+    explicit TimeoutAwaiter(Shared<TimeoutState<T>> state) : state_(std::move(state)) { }
+    [[nodiscard]] auto await_ready() const noexcept -> bool { return state_->resolved; }
+    auto await_suspend(std::coroutine_handle<> h) noexcept -> bool
+    {
+        state_->waiter = h;
+        return !state_->resolved;
+    }
+    [[nodiscard]] auto await_resume() -> Result<T> { return std::move(state_->result); }
+
+private:
+    Shared<TimeoutState<T>> state_;
+};
+
+} // namespace detail
+
+template<typename T>
+[[nodiscard]] auto timeout(Task<Result<T>> task, Duration dur) -> Task<Result<T>>
+{
+    auto state = std::make_shared<detail::TimeoutState<T>>();
+    auto task_src = std::make_shared<std::stop_source>();  // 哨兵据此取消 task
+    auto timer_src = std::make_shared<std::stop_source>(); // task 据此取消哨兵的 sleep
+
+    task.set_cancellation(task_src->get_token()); // 令牌经 task 的 await_transform 传到叶子 I/O awaiter
+
+    auto timer_racer = detail::timeout_timer_racer<T>(dur, state, task_src);
+    timer_racer.set_cancellation(timer_src->get_token()); // 令牌经哨兵的 await_transform 传到 sleep
+
+    g_event_loop->spawn(detail::timeout_task_racer<T>(std::move(task), state, timer_src));
+    g_event_loop->spawn(std::move(timer_racer));
+
+    co_await detail::TimeoutAwaiter<T>(state);
     co_return std::move(state->result);
 }
 
