@@ -22,7 +22,9 @@ inline void cpu_pause() noexcept
 #endif
 }
 
-class SpinLock {
+// 对齐到一条 cacheline：自旋锁的 test_and_set/clear 是跨核高频写，独占 cacheline 可避免
+// 与相邻数据（或数组中相邻的锁）发生伪共享，让一个核的加锁不去 invalidate 别核的热数据。
+class alignas(64) SpinLock {
 public:
     SpinLock() = default;
 

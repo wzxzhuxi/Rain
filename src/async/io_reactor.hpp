@@ -11,7 +11,6 @@
 #include <optional>
 #include <sys/epoll.h>
 #include <unistd.h>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -51,7 +50,7 @@ public:
 
     EpollReactor(EpollReactor&& other) noexcept
         : epoll_fd_(std::exchange(other.epoll_fd_, -1)), events_(std::move(other.events_)),
-          pending_(std::move(other.pending_)), ready_(std::move(other.ready_))
+          slots_(std::move(other.slots_)), ready_(std::move(other.ready_))
     { }
 
     auto operator=(EpollReactor&& other) noexcept -> EpollReactor&
@@ -62,7 +61,7 @@ public:
             }
             epoll_fd_ = std::exchange(other.epoll_fd_, -1);
             events_ = std::move(other.events_);
-            pending_ = std::move(other.pending_);
+            slots_ = std::move(other.slots_);
             ready_ = std::move(other.ready_);
         }
         return *this;
@@ -115,7 +114,7 @@ public:
                 return Err(SystemError::from_errno());
             }
         }
-        pending_.erase(fd);
+        clear_slot(fd);
         return Ok();
     }
 
@@ -138,11 +137,13 @@ public:
             const i32 fd = events_[static_cast<usize>(i)].data.fd;
             const u32 ep = events_[static_cast<usize>(i)].events;
 
-            auto it = pending_.find(fd);
-            if (it == pending_.end())
+            // fd 作下标直接寻址，0 哈希 0 指针追逐；空闲槽（无等待者）跳过。
+            if (fd < 0 || static_cast<usize>(fd) >= slots_.size())
+                continue;
+            auto& e = slots_[static_cast<usize>(fd)];
+            if (!e.read && !e.write)
                 continue;
 
-            auto& e = it->second;
             const bool err = (ep & (EPOLLERR | EPOLLHUP)) != 0;
 
             // 错误/挂断唤醒两个方向；否则按 EPOLLIN/EPOLLOUT 分派到对应等待者。
@@ -157,7 +158,7 @@ public:
                 e.write.reset();
             }
 
-            (void)rearm_or_erase(fd, it);
+            (void)rearm_or_erase(fd);
         }
 
         return Ok(completed);
@@ -183,7 +184,7 @@ public:
                                      .message = "register_read: negative fd",
                                      .location = std::source_location::current() });
         }
-        auto& e = pending_[fd];
+        auto& e = ensure_slot(fd);
         if (e.read) {
             return Err(SystemError { .code = std::make_error_code(std::errc::device_or_resource_busy),
                                      .message = "register_read: read already pending on fd",
@@ -196,9 +197,7 @@ public:
             interest = interest | IoEvent::Write;
         auto ensure_result = ensure(fd, interest);
         if (!ensure_result) {
-            e.read.reset();
-            if (!e.write)
-                pending_.erase(fd);
+            e.read.reset(); // 槽复位即等价于“移除”，留在原位待复用，无需 erase
             return Err(std::move(ensure_result).error());
         }
         return Ok();
@@ -224,7 +223,7 @@ public:
                                      .message = "register_write: negative fd",
                                      .location = std::source_location::current() });
         }
-        auto& e = pending_[fd];
+        auto& e = ensure_slot(fd);
         if (e.write) {
             return Err(SystemError { .code = std::make_error_code(std::errc::device_or_resource_busy),
                                      .message = "register_write: write already pending on fd",
@@ -237,9 +236,7 @@ public:
             interest = interest | IoEvent::Read;
         auto ensure_result = ensure(fd, interest);
         if (!ensure_result) {
-            e.write.reset();
-            if (!e.read)
-                pending_.erase(fd);
+            e.write.reset(); // 槽复位即等价于“移除”，留在原位待复用，无需 erase
             return Err(std::move(ensure_result).error());
         }
         return Ok();
@@ -247,24 +244,34 @@ public:
 
     auto deregister(i32 fd) -> Unit
     {
-        pending_.erase(fd);
+        clear_slot(fd);
         return unit;
     }
 
     // 仅注销指定方向；若另一方向仍挂起则重新武装，否则移除 fd。
     auto deregister(i32 fd, IoEvent dir) -> Unit
     {
-        auto it = pending_.find(fd);
-        if (it == pending_.end())
+        if (fd < 0 || static_cast<usize>(fd) >= slots_.size())
+            return unit;
+        auto& e = slots_[static_cast<usize>(fd)];
+        if (!e.read && !e.write)
             return unit;
         if (has_flag(dir, IoEvent::Read))
-            it->second.read.reset();
+            e.read.reset();
         if (has_flag(dir, IoEvent::Write))
-            it->second.write.reset();
-        return rearm_or_erase(fd, it);
+            e.write.reset();
+        return rearm_or_erase(fd);
     }
 
     [[nodiscard]] auto drain_ready() -> std::vector<std::coroutine_handle<>> { return std::exchange(ready_, { }); }
+
+    // 把就绪句柄直接追加到 out 后清空 ready_（保留其容量复用），避免每轮一个中间 vector
+    // 及其反复 realloc。这是事件循环热路径的首选；drain_ready() 仅留给独立调用方/测试。
+    auto drain_ready_into(std::vector<std::coroutine_handle<>>& out) -> void
+    {
+        out.insert(out.end(), ready_.begin(), ready_.end());
+        ready_.clear();
+    }
 
     [[nodiscard]] auto valid() const noexcept -> bool { return epoll_fd_ >= 0; }
 
@@ -277,7 +284,7 @@ public:
             }
             epoll_fd_ = -1;
         }
-        pending_.clear();
+        slots_.clear();
         ready_.clear();
         if (first_error.has_value()) {
             return Err(std::move(*first_error));
@@ -319,20 +326,44 @@ private:
         return false;
     }
 
-    // 按仍挂起的方向重新武装 fd（EPOLLONESHOT 每次事件后失效），无挂起则移除。
-    auto rearm_or_erase(i32 fd, std::unordered_map<i32, FdEntry>::iterator it) -> Unit
+    // 按仍挂起的方向重新武装 fd（EPOLLONESHOT 每次事件后失效），无挂起则槽位归还复用。
+    auto rearm_or_erase(i32 fd) -> Unit
     {
-        if (!it->second.read && !it->second.write) {
-            pending_.erase(it);
+        if (fd < 0 || static_cast<usize>(fd) >= slots_.size())
+            return unit;
+        auto& e = slots_[static_cast<usize>(fd)];
+        if (!e.read && !e.write) {
+            // 槽空闲：EPOLLONESHOT 已使 fd 在内核侧失效，无需 epoll DEL；槽留在 vector 中待复用。
             return unit;
         }
         IoEvent interest = IoEvent::EdgeTrig | IoEvent::OneShot;
-        if (it->second.read)
+        if (e.read)
             interest = interest | IoEvent::Read;
-        if (it->second.write)
+        if (e.write)
             interest = interest | IoEvent::Write;
         (void)ensure(fd, interest);
         return unit;
+    }
+
+    // 以 fd 为下标定位槽位，按需增长 vector（fd 为内核分配的稠密小整数，会被复用，最大值很快收敛）。
+    [[nodiscard]] auto ensure_slot(i32 fd) -> FdEntry&
+    {
+        const auto idx = static_cast<usize>(fd);
+        if (idx >= slots_.size())
+            slots_.resize(idx + 1);
+        return slots_[idx];
+    }
+
+    // 清空某 fd 槽位，等价于原 map 的 erase：两方向复位后槽回到空闲态，留在原位待复用（零释放）。
+    auto clear_slot(i32 fd) -> void
+    {
+        if (fd < 0)
+            return;
+        const auto idx = static_cast<usize>(fd);
+        if (idx < slots_.size()) {
+            slots_[idx].read.reset();
+            slots_[idx].write.reset();
+        }
     }
 
     explicit EpollReactor(i32 epoll_fd) : epoll_fd_(epoll_fd), events_(kMaxEventsPerPoll) { }
@@ -357,7 +388,9 @@ private:
 
     i32 epoll_fd_ = -1;
     std::vector<epoll_event> events_;
-    std::unordered_map<i32, FdEntry> pending_;
+    // fd 作下标的稠密槽位表，取代原 unordered_map<fd, FdEntry>：
+    // 0 哈希、0 节点分配、cache 友好；空闲槽（read/write 均 nullopt）即“不存在”，复用而非释放。
+    std::vector<FdEntry> slots_;
     std::vector<std::coroutine_handle<>> ready_;
 };
 

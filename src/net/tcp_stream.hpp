@@ -103,55 +103,60 @@ public:
 
     // -- 异步 I/O ------------------------------------------------------
 
+    // 以下公开 I/O 方法均为普通转发函数（非协程）：直接返回 detail:: 下层协程的 Task，
+    // 省去一层包装协程帧（以及成员协程对 this 的隐式捕获）。下层 detail:: 因含 EAGAIN
+    // 重试循环必须保持协程；fd 按值、reactor 按长生命周期引用进入下层帧，await 期间
+    // 不依赖本 TcpStream 存活。
+
     [[nodiscard]] auto read(u8* buf, usize len) -> async::Task<Result<usize>>
     {
-        co_return co_await detail::read_some(*reactor_, fd_, buf, len);
+        return detail::read_some(*reactor_, fd_, buf, len);
     }
 
     [[nodiscard]] auto read_with_timeout(u8* buf, usize len, async::Duration timeout) -> async::Task<Result<usize>>
     {
-        co_return co_await detail::read_some_with_timeout(*reactor_, fd_, buf, len, timeout);
+        return detail::read_some_with_timeout(*reactor_, fd_, buf, len, timeout);
     }
 
     [[nodiscard]] auto write(const u8* buf, usize len) -> async::Task<Result<usize>>
     {
-        co_return co_await detail::write_some(*reactor_, fd_, buf, len);
+        return detail::write_some(*reactor_, fd_, buf, len);
     }
 
     [[nodiscard]] auto write_with_timeout(const u8* buf, usize len, async::Duration timeout)
         -> async::Task<Result<usize>>
     {
-        co_return co_await detail::write_some_with_timeout(*reactor_, fd_, buf, len, timeout);
+        return detail::write_some_with_timeout(*reactor_, fd_, buf, len, timeout);
     }
 
     // 写入全部字节，处理部分写场景。
     [[nodiscard]] auto write_all(const u8* buf, usize len) -> async::Task<Result<usize>>
     {
-        co_return co_await detail::write_all(*reactor_, fd_, buf, len);
+        return detail::write_all(*reactor_, fd_, buf, len);
     }
 
     // 在超时预算内写入全部字节，处理部分写场景。
     [[nodiscard]] auto write_all_with_timeout(const u8* buf, usize len, async::Duration timeout)
         -> async::Task<Result<usize>>
     {
-        co_return co_await detail::write_all_with_timeout(*reactor_, fd_, buf, len, timeout);
+        return detail::write_all_with_timeout(*reactor_, fd_, buf, len, timeout);
     }
 
     [[nodiscard]] auto send_file(i32 in_fd, off_t& offset, usize count) -> async::Task<Result<usize>>
     {
-        co_return co_await detail::send_file_some(*reactor_, fd_, in_fd, offset, count);
+        return detail::send_file_some(*reactor_, fd_, in_fd, offset, count);
     }
 
     [[nodiscard]] auto send_file_with_timeout(i32 in_fd, off_t& offset, usize count, async::Duration timeout)
         -> async::Task<Result<usize>>
     {
-        co_return co_await detail::send_file_some_with_timeout(*reactor_, fd_, in_fd, offset, count, timeout);
+        return detail::send_file_some_with_timeout(*reactor_, fd_, in_fd, offset, count, timeout);
     }
 
     [[nodiscard]] auto send_file_all_with_timeout(i32 in_fd, off_t offset, usize count, async::Duration timeout)
         -> async::Task<Result<usize>>
     {
-        co_return co_await detail::send_file_all_with_timeout(*reactor_, fd_, in_fd, offset, count, timeout);
+        return detail::send_file_all_with_timeout(*reactor_, fd_, in_fd, offset, count, timeout);
     }
 
     // -- 套接字选项 ----------------------------------------------------

@@ -11,8 +11,12 @@
 
 namespace rain::sync {
 
+// 对齐到 cacheline 边界：Channel 是显式的跨核通信原语，对齐可避免其内部状态与相邻对象
+// 发生伪共享。注意 Channel 内部全程由 mutex_ 串行化（连 size()/is_closed() 都加锁），
+// 故 producer/consumer 不会真正并发触碰字段——这里的对齐是防相邻对象伪共享，而非内部拆分；
+// 真正的开销来自重量级 mutex+cv（见架构债，留待 lock-free SPSC/MPSC 重写）。
 template<typename T>
-class Channel {
+class alignas(64) Channel {
 public:
     explicit Channel(usize capacity = 0) : capacity_(capacity) { }
 

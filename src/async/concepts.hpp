@@ -19,6 +19,7 @@ enum class WaitState : u8 {
     Pending = 0,
     Ready,
     TimedOut,
+    Cancelled, // 被 stop_callback 抢占取消（reactor/timer 只对 Pending 动作，新增此态对它们无影响）
 };
 
 // ── IoEvent——抽象 I/O 事件标志 ───────────────────────────────────────
