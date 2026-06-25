@@ -3,6 +3,7 @@
 #include "core/types.hpp"
 #include "core/result.hpp"
 #include "core/concepts.hpp"
+#include "core/diagnostics.hpp"
 
 #include "sync/channel.hpp"
 #include "sync/spinlock.hpp"
