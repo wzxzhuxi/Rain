@@ -47,7 +47,7 @@ endif()
 # ── Tests (ctest) ─────────────────────────────────────────────────
 if(RAIN_BUILD_TESTS)
     enable_testing()
-    foreach(t timer reactor channel runtime signal property soak sim)
+    foreach(t timer reactor channel runtime signal property soak sim cancel net fs lifetime graceful)
         add_executable(rain_${t}_test test/${t}_test.cpp)
         target_link_libraries(rain_${t}_test PRIVATE rain_core)
         target_include_directories(rain_${t}_test PRIVATE test)
