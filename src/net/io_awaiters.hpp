@@ -15,20 +15,19 @@
 #include <utility>
 
 namespace rain::net {
-
-// 抢占式取消的共用收尾：被 stop_callback 触发，在 owner 核同步执行（与 reactor.poll/timer.tick
-// 串行，故无需原子）。把 Pending 翻成 Cancelled、从 reactor 摘除该 fd 方向、调度唤醒挂起的协程。
 namespace detail {
+// 抢占式取消的共用收尾：owner 核上与 reactor.poll/timer.tick 串行执行，故无需原子。
+// Pending→Cancelled、摘除 reactor 方向、调度唤醒；await_resume 见 Cancelled 即返回错误。
 template<typename R>
 inline auto cancel_io_wait(R& reactor, i32 fd, async::IoEvent dir, async::WaitState& state,
-    std::coroutine_handle<> handle) -> void
+                           std::coroutine_handle<> handle) -> void
 {
     if (state != async::WaitState::Pending)
-        return; // 已就绪/已超时，取消无效
+        return;
     state = async::WaitState::Cancelled;
-    (void)reactor.deregister(fd, dir); // 摘除，避免 reactor 也 fire 这个句柄
+    (void)reactor.deregister(fd, dir);
     if (async::g_event_loop && handle)
-        async::g_event_loop->notify(handle); // 调度唤醒：下一轮事件循环 resume，await_resume 见 Cancelled
+        async::g_event_loop->notify(handle);
 }
 
 [[nodiscard]] inline auto io_cancelled_error() -> SystemError
@@ -37,6 +36,57 @@ inline auto cancel_io_wait(R& reactor, i32 fd, async::IoEvent dir, async::WaitSt
                          .message = "io operation cancelled",
                          .location = std::source_location::current() };
 }
+
+// 读/写就绪等待器的公共实现；R 只需满足 IoReactorLike（测试可注入 SimReactor）。
+template<typename R, bool kWrite>
+class ReadyAwaiter {
+public:
+    ReadyAwaiter(R& reactor, i32 fd) : reactor_(reactor), fd_(fd) { }
+
+    auto set_cancellation(std::stop_token token) -> void { token_ = std::move(token); }
+
+    [[nodiscard]] auto await_ready() noexcept -> bool { return false; }
+
+    auto await_suspend(std::coroutine_handle<> h) -> bool
+    {
+        handle_ = h;
+        auto reg = kWrite ? reactor_.register_write(fd_, h, nullptr, 0, &readiness_, &state_, async::WaitState::Ready)
+                          : reactor_.register_read(fd_, h, nullptr, 0, &readiness_, &state_, async::WaitState::Ready);
+        if (!reg) {
+            readiness_ = Err(std::move(reg).error());
+            return false;
+        }
+        if (token_.stop_possible())
+            cancel_cb_.emplace(token_, [this] { cancel_io_wait(reactor_, fd_, direction(), state_, handle_); });
+        return true;
+    }
+
+    [[nodiscard]] auto await_resume() -> Result<Unit>
+    {
+        cancel_cb_.reset(); // owner 核同步析构
+        if (state_ == async::WaitState::Cancelled)
+            return Err(io_cancelled_error());
+        if (!readiness_)
+            return Err(std::move(readiness_).error());
+        return Ok();
+    }
+
+private:
+    static constexpr auto direction() -> async::IoEvent
+    {
+        return kWrite ? async::IoEvent::Write : async::IoEvent::Read;
+    }
+
+    R& reactor_;
+    i32 fd_;
+    std::coroutine_handle<> handle_ {};
+    async::WaitState state_ = async::WaitState::Pending;
+    std::stop_token token_ {};
+    std::optional<std::stop_callback<std::function<void()>>> cancel_cb_ {};
+    Result<usize> readiness_ = Err(SystemError { .code = std::make_error_code(std::errc::operation_canceled),
+                                                 .message = "io readiness not completed",
+                                                 .location = std::source_location::current() });
+};
 } // namespace detail
 
 class ConnectAwaiter {
@@ -56,27 +106,22 @@ public:
             return false;
         }
         if (token_.stop_possible())
-            cancel_cb_.emplace(token_, [this] {
-                detail::cancel_io_wait(reactor_, fd_, async::IoEvent::Write, state_, handle_);
-            });
+            cancel_cb_.emplace(
+                token_, [this] { detail::cancel_io_wait(reactor_, fd_, async::IoEvent::Write, state_, handle_); });
         return true;
     }
 
     [[nodiscard]] auto await_resume() -> Result<Unit>
     {
         cancel_cb_.reset();
-        if (state_ == async::WaitState::Cancelled) {
+        if (state_ == async::WaitState::Cancelled)
             return Err(detail::io_cancelled_error());
-        }
-        if (!readiness_) {
+        if (!readiness_)
             return Err(std::move(readiness_).error());
-        }
-
         i32 err = 0;
         socklen_t len = sizeof(err);
-        if (::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &err, &len) < 0) {
+        if (::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &err, &len) < 0)
             return Err(SystemError::from_errno());
-        }
         if (err != 0) {
             return Err(SystemError { .code = std::make_error_code(static_cast<std::errc>(err)),
                                      .message = "connect failed",
@@ -97,114 +142,28 @@ private:
                                                  .location = std::source_location::current() });
 };
 
-// 就绪等待器对 reactor 类型泛化（CTAD 推导）：生产路径推导出 EpollReactor、生成与原先逐字节
-// 相同的代码；测试可传入满足 IoReactorLike 的 SimReactor 做确定性仿真。
-// set_cancellation 注入取消令牌后，挂 stop_callback：request_stop 时（owner 核同步）抢占唤醒。
 template<typename R>
-class ReadReadyAwaiter {
+class ReadReadyAwaiter : public detail::ReadyAwaiter<R, false> {
 public:
-    ReadReadyAwaiter(R& reactor, i32 fd) : reactor_(reactor), fd_(fd) { }
-
-    auto set_cancellation(std::stop_token token) -> void { token_ = std::move(token); }
-
-    [[nodiscard]] auto await_ready() noexcept -> bool { return false; }
-
-    auto await_suspend(std::coroutine_handle<> h) -> bool
-    {
-        handle_ = h;
-        // 带 state 注册：reactor 就绪做 Pending→Ready，与取消回调的 Pending→Cancelled 竞争（owner 核串行）。
-        auto reg = reactor_.register_read(fd_, h, nullptr, 0, &readiness_, &state_, async::WaitState::Ready);
-        if (!reg) {
-            readiness_ = Err(std::move(reg).error());
-            return false;
-        }
-        if (token_.stop_possible())
-            cancel_cb_.emplace(token_, [this] {
-                detail::cancel_io_wait(reactor_, fd_, async::IoEvent::Read, state_, handle_);
-            });
-        return true;
-    }
-
-    [[nodiscard]] auto await_resume() -> Result<Unit>
-    {
-        cancel_cb_.reset(); // 先析构 callback（owner 核同步，不阻塞）
-        if (state_ == async::WaitState::Cancelled) {
-            return Err(detail::io_cancelled_error());
-        }
-        if (!readiness_) {
-            return Err(std::move(readiness_).error());
-        }
-        return Ok();
-    }
-
-private:
-    R& reactor_;
-    i32 fd_;
-    std::coroutine_handle<> handle_ {};
-    async::WaitState state_ = async::WaitState::Pending;
-    std::stop_token token_ {};
-    std::optional<std::stop_callback<std::function<void()>>> cancel_cb_ {};
-    Result<usize> readiness_ = Err(SystemError { .code = std::make_error_code(std::errc::operation_canceled),
-                                                 .message = "read readiness not completed",
-                                                 .location = std::source_location::current() });
+    using detail::ReadyAwaiter<R, false>::ReadyAwaiter;
 };
 
 template<typename R>
-class WriteReadyAwaiter {
+class WriteReadyAwaiter : public detail::ReadyAwaiter<R, true> {
 public:
-    WriteReadyAwaiter(R& reactor, i32 fd) : reactor_(reactor), fd_(fd) { }
-
-    auto set_cancellation(std::stop_token token) -> void { token_ = std::move(token); }
-
-    [[nodiscard]] auto await_ready() noexcept -> bool { return false; }
-
-    auto await_suspend(std::coroutine_handle<> h) -> bool
-    {
-        handle_ = h;
-        auto reg = reactor_.register_write(fd_, h, nullptr, 0, &readiness_, &state_, async::WaitState::Ready);
-        if (!reg) {
-            readiness_ = Err(std::move(reg).error());
-            return false;
-        }
-        if (token_.stop_possible())
-            cancel_cb_.emplace(token_, [this] {
-                detail::cancel_io_wait(reactor_, fd_, async::IoEvent::Write, state_, handle_);
-            });
-        return true;
-    }
-
-    [[nodiscard]] auto await_resume() -> Result<Unit>
-    {
-        cancel_cb_.reset();
-        if (state_ == async::WaitState::Cancelled) {
-            return Err(detail::io_cancelled_error());
-        }
-        if (!readiness_) {
-            return Err(std::move(readiness_).error());
-        }
-        return Ok();
-    }
-
-private:
-    R& reactor_;
-    i32 fd_;
-    std::coroutine_handle<> handle_ {};
-    async::WaitState state_ = async::WaitState::Pending;
-    std::stop_token token_ {};
-    std::optional<std::stop_callback<std::function<void()>>> cancel_cb_ {};
-    Result<usize> readiness_ = Err(SystemError { .code = std::make_error_code(std::errc::operation_canceled),
-                                                 .message = "write readiness not completed",
-                                                 .location = std::source_location::current() });
+    using detail::ReadyAwaiter<R, true>::ReadyAwaiter;
 };
+
+template<typename R>
+ReadReadyAwaiter(R&, i32) -> ReadReadyAwaiter<R>;
+template<typename R>
+WriteReadyAwaiter(R&, i32) -> WriteReadyAwaiter<R>;
 
 class TimedReadyAwaiter {
 public:
     enum class Direction : u8 { Read, Write };
 
-    TimedReadyAwaiter(async::EpollReactor& reactor,
-                      async::HierarchicalTimerWheel& timer,
-                      i32 fd,
-                      Direction direction,
+    TimedReadyAwaiter(async::EpollReactor& reactor, async::HierarchicalTimerWheel& timer, i32 fd, Direction direction,
                       async::Duration timeout)
         : reactor_(reactor), timer_(timer), fd_(fd), direction_(direction), timeout_(timeout)
     { }
@@ -220,33 +179,28 @@ public:
             return false;
         }
         handle_ = h;
-
         timer_id_ = timer_.schedule(timeout_, h, &state_, async::WaitState::TimedOut);
-
         auto reg = (direction_ == Direction::Read)
                        ? reactor_.register_read(fd_, h, nullptr, 0, &readiness_, &state_, async::WaitState::Ready)
                        : reactor_.register_write(fd_, h, nullptr, 0, &readiness_, &state_, async::WaitState::Ready);
-
         if (!reg) {
             (void)timer_.cancel(timer_id_);
             readiness_ = Err(std::move(reg).error());
             return false;
         }
 
-        // 外部取消（如 timeout(task) 取消整条链）：第三个竞争者——除 reactor 就绪/定时器超时外，
-        // stop_callback 把 Pending→Cancelled、同时撤掉 timer 与 reactor 注册、唤醒。owner 核同步。
-        if (token_.stop_possible())
+        // 第三个竞争者：外部取消同时撤掉 timer 与 reactor 注册并唤醒（owner 核同步）。
+        if (token_.stop_possible()) {
             cancel_cb_.emplace(token_, [this] {
                 if (state_ != async::WaitState::Pending)
                     return;
                 state_ = async::WaitState::Cancelled;
                 (void)timer_.cancel(timer_id_);
-                (void)reactor_.deregister(
-                    fd_, direction_ == Direction::Read ? async::IoEvent::Read : async::IoEvent::Write);
+                (void)reactor_.deregister(fd_, direction());
                 if (async::g_event_loop && handle_)
                     async::g_event_loop->notify(handle_);
             });
-
+        }
         return true;
     }
 
@@ -258,23 +212,25 @@ public:
             return Err(detail::io_cancelled_error());
         }
         if (state_ == async::WaitState::TimedOut) {
-            reactor_.deregister(fd_,
-                                direction_ == Direction::Read ? async::IoEvent::Read : async::IoEvent::Write);
+            reactor_.deregister(fd_, direction());
             return Err(SystemError { .code = std::make_error_code(std::errc::timed_out),
                                      .message = direction_ == Direction::Read ? "read timeout" : "write timeout",
                                      .location = std::source_location::current() });
         }
-
         (void)timer_.cancel(timer_id_);
-
-        if (!readiness_) {
+        if (!readiness_)
             return Err(std::move(readiness_).error());
-        }
-
         return Ok();
     }
 
 private:
+    static constexpr auto dir(Direction d) -> async::IoEvent
+    {
+        return d == Direction::Read ? async::IoEvent::Read : async::IoEvent::Write;
+    }
+
+    auto direction() const -> async::IoEvent { return dir(direction_); }
+
     async::EpollReactor& reactor_;
     async::HierarchicalTimerWheel& timer_;
     i32 fd_;
@@ -289,5 +245,4 @@ private:
                                                  .message = "timed readiness not completed",
                                                  .location = std::source_location::current() });
 };
-
 } // namespace rain::net

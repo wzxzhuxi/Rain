@@ -6,6 +6,7 @@
 #include "async/event_loop.hpp"
 #include "async/io_reactor.hpp"
 #include "net/address.hpp"
+#include "net/io_awaiters.hpp"
 
 #include <coroutine>
 #include <functional>
@@ -15,27 +16,25 @@
 #include <utility>
 
 namespace rain::net {
-
 class AcceptAwaiter {
 public:
     AcceptAwaiter(async::EpollReactor& reactor, i32 listen_fd) : reactor_(reactor), listen_fd_(listen_fd) { }
 
-    // 注入取消令牌：优雅停机时取消挂起的 accept，使 accept loop 退出（spawn_service 注入此令牌）。
+    // 优雅停机：spawn_service 注入令牌，挂起的 accept 被抢占取消，accept loop 退出。
     auto set_cancellation(std::stop_token token) -> void { token_ = std::move(token); }
 
     [[nodiscard]] auto await_ready() noexcept -> bool
     {
         struct sockaddr_storage peer { };
         socklen_t peer_len = sizeof(peer);
-        const i32 fd
-            = ::accept4(listen_fd_, reinterpret_cast<struct sockaddr*>(&peer), &peer_len, SOCK_NONBLOCK | SOCK_CLOEXEC);
-        if (fd >= 0) {
-            eager_fd_ = fd;
-            eager_peer_ = peer;
-            eager_peer_len_ = peer_len;
-            return true;
-        }
-        return false;
+        const i32 fd = ::accept4(
+            listen_fd_, reinterpret_cast<struct sockaddr*>(&peer), &peer_len, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        if (fd < 0)
+            return false;
+        eager_fd_ = fd;
+        eager_peer_ = peer;
+        eager_peer_len_ = peer_len;
+        return true;
     }
 
     auto await_suspend(std::coroutine_handle<> h) -> bool
@@ -47,14 +46,8 @@ public:
             return false;
         }
         if (token_.stop_possible())
-            cancel_cb_.emplace(token_, [this] {
-                if (state_ != async::WaitState::Pending)
-                    return;
-                state_ = async::WaitState::Cancelled;
-                (void)reactor_.deregister(listen_fd_, async::IoEvent::Read);
-                if (async::g_event_loop && handle_)
-                    async::g_event_loop->notify(handle_);
-            });
+            cancel_cb_.emplace(
+                token_, [this] { detail::cancel_io_wait(reactor_, listen_fd_, async::IoEvent::Read, state_, handle_); });
         return true;
     }
 
@@ -65,28 +58,20 @@ public:
             auto peer_addr = SocketAddress::from_raw(eager_peer_, eager_peer_len_);
             return Ok(std::pair { eager_fd_, std::move(peer_addr) });
         }
-
         if (state_ == async::WaitState::Cancelled) {
             return Err(SystemError { .code = std::make_error_code(std::errc::operation_canceled),
                                      .message = "accept cancelled (graceful shutdown)",
                                      .location = std::source_location::current() });
         }
-
-        if (!readiness_) {
+        if (!readiness_)
             return Err(std::move(readiness_).error());
-        }
-
-        struct sockaddr_storage peer_storage { };
-        socklen_t peer_len = sizeof(peer_storage);
-
+        struct sockaddr_storage peer { };
+        socklen_t peer_len = sizeof(peer);
         const i32 conn_fd = ::accept4(
-            listen_fd_, reinterpret_cast<struct sockaddr*>(&peer_storage), &peer_len, SOCK_NONBLOCK | SOCK_CLOEXEC);
-
-        if (conn_fd < 0) {
+            listen_fd_, reinterpret_cast<struct sockaddr*>(&peer), &peer_len, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        if (conn_fd < 0)
             return Err(SystemError::from_errno());
-        }
-
-        auto peer_addr = SocketAddress::from_raw(peer_storage, peer_len);
+        auto peer_addr = SocketAddress::from_raw(peer, peer_len);
         return Ok(std::pair { conn_fd, std::move(peer_addr) });
     }
 
@@ -104,5 +89,4 @@ private:
                                                  .message = "accept not completed",
                                                  .location = std::source_location::current() });
 };
-
 } // namespace rain::net
