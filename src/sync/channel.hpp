@@ -3,125 +3,219 @@
 #include "core/result.hpp"
 #include "core/types.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <optional>
-#include <queue>
+#include <vector>
 
 namespace rain::sync {
 
-// 对齐到 cacheline 边界：Channel 是显式的跨核通信原语，对齐可避免其内部状态与相邻对象
-// 发生伪共享。注意 Channel 内部全程由 mutex_ 串行化（连 size()/is_closed() 都加锁），
-// 故 producer/consumer 不会真正并发触碰字段——这里的对齐是防相邻对象伪共享，而非内部拆分；
-// 真正的开销来自重量级 mutex+cv（见架构债，留待 lock-free SPSC/MPSC 重写）。
+// 无锁有界 MPMC 队列（Vyukov）：入队/出队只用原子 CAS 与 cell 序号，
+// 数据通路不加锁；mutex+cv 仅用于“满/空时阻塞等待”，不参与数据传递。
 template<typename T>
 class alignas(64) Channel {
 public:
-    explicit Channel(usize capacity = 0) : capacity_(capacity) { }
+    // capacity == 0 为兼容旧 API 的默认值，映射为 kDefaultCapacity（有界）。
+    explicit Channel(usize capacity = 0)
+        : capacity_(capacity == 0 ? kDefaultCapacity : capacity), cells_(capacity_)
+    {
+        for (usize i = 0; i < capacity_; ++i)
+            cells_[i].seq.store(i, std::memory_order_relaxed);
+    }
+
+    Channel(const Channel&) = delete;
+    auto operator=(const Channel&) -> Channel& = delete;
 
     [[nodiscard]] auto send(T value) -> Result<Unit>
     {
-        std::unique_lock<std::mutex> lock(mutex_);
-        if (capacity_ > 0) {
-            not_full_.wait(lock, [this] { return queue_.size() < capacity_ || closed_; });
+        if (closed_.load(std::memory_order_acquire))
+            return closed_error("send on closed channel");
+        if (try_push(std::move(value))) {
+            notify(not_empty_);
+            return Ok();
         }
-        if (closed_) {
-            return Err(SystemError { .code = std::make_error_code(std::errc::broken_pipe),
-                                     .message = "send on closed channel",
-                                     .location = std::source_location::current() });
+
+        std::unique_lock lock(wait_mutex_);
+        while (true) {
+            if (closed_.load(std::memory_order_acquire))
+                return closed_error("send on closed channel");
+            if (try_push(std::move(value))) {
+                not_empty_.notify_one();
+                return Ok();
+            }
+            not_full_.wait(lock);
         }
-        queue_.push(std::move(value));
-        not_empty_.notify_one();
-        return Ok();
     }
 
     [[nodiscard]] auto try_send(T value) -> Result<Unit>
     {
-        std::lock_guard lock(mutex_);
-        if (closed_) {
-            return Err(SystemError { .code = std::make_error_code(std::errc::broken_pipe),
-                                     .message = "send on closed channel",
-                                     .location = std::source_location::current() });
-        }
-        if (capacity_ > 0 && queue_.size() >= capacity_) {
-            return Err(SystemError { .code = std::make_error_code(std::errc::resource_unavailable_try_again),
-                                     .message = "send on full channel",
-                                     .location = std::source_location::current() });
-        }
-        queue_.push(std::move(value));
-        not_empty_.notify_one();
+        if (closed_.load(std::memory_order_acquire))
+            return closed_error("send on closed channel");
+        if (!try_push(std::move(value)))
+            return full_error();
+        notify(not_empty_);
         return Ok();
     }
 
     [[nodiscard]] auto recv() -> std::optional<T>
     {
-        std::unique_lock<std::mutex> lock(mutex_);
-        not_empty_.wait(lock, [this] { return !queue_.empty() || closed_; });
-        if (queue_.empty()) {
-            return std::nullopt;
+        if (auto value = try_pop()) {
+            notify(not_full_);
+            return value;
         }
-        T value = std::move(queue_.front());
-        queue_.pop();
-        not_full_.notify_one();
-        return value;
+
+        std::unique_lock lock(wait_mutex_);
+        while (true) {
+            if (auto value = try_pop()) {
+                not_full_.notify_one();
+                return value;
+            }
+            if (closed_.load(std::memory_order_acquire))
+                return std::nullopt;
+            not_empty_.wait(lock);
+        }
     }
+
     [[nodiscard]] auto try_recv() -> std::optional<T>
     {
-        std::lock_guard lock(mutex_);
-        if (queue_.empty()) {
-            return std::nullopt;
-        }
-        T value = std::move(queue_.front());
-        queue_.pop();
-        not_full_.notify_one();
+        auto value = try_pop();
+        if (value)
+            notify(not_full_);
         return value;
     }
+
     template<typename Rep, typename Period>
     [[nodiscard]] auto recv_timeout(std::chrono::duration<Rep, Period> timeout) -> std::optional<T>
     {
-        std::unique_lock lock(mutex_);
-        if (!not_empty_.wait_for(lock, timeout, [this] { return !queue_.empty() || closed_; })) {
-            return std::nullopt;
+        std::unique_lock lock(wait_mutex_);
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (true) {
+            if (auto value = try_pop()) {
+                not_full_.notify_one();
+                return value;
+            }
+            if (closed_.load(std::memory_order_acquire))
+                return std::nullopt;
+            if (not_empty_.wait_until(lock, deadline) == std::cv_status::timeout) {
+                if (auto value = try_pop()) {
+                    not_full_.notify_one();
+                    return value;
+                }
+                return std::nullopt;
+            }
         }
-        if (queue_.empty()) {
-            return std::nullopt;
-        }
-        T value = std::move(queue_.front());
-        queue_.pop();
-        not_full_.notify_one();
-        return value;
     }
+
     auto close() -> Unit
     {
-        std::lock_guard lock(mutex_);
-        closed_ = true;
+        closed_.store(true, std::memory_order_release);
+        {
+            // 空锁段：让已通过条件检查、尚未进入 wait 的线程先落锁，避免丢唤醒。
+            std::lock_guard lock(wait_mutex_);
+        }
         not_empty_.notify_all();
         not_full_.notify_all();
         return unit;
     }
-    [[nodiscard]] auto is_closed() const -> bool
-    {
-        std::lock_guard lock(mutex_);
-        return closed_;
-    }
-    [[nodiscard]] auto size() const -> usize
-    {
-        std::lock_guard lock(mutex_);
-        return queue_.size();
-    }
+
+    [[nodiscard]] auto is_closed() const -> bool { return closed_.load(std::memory_order_acquire); }
+    [[nodiscard]] auto size() const -> usize { return size_.load(std::memory_order_relaxed); }
 
 private:
-    mutable std::mutex mutex_;
+    struct Cell {
+        std::atomic<usize> seq { 0 };
+        std::optional<T> data;
+    };
+
+    static constexpr usize kDefaultCapacity = 1024;
+
+    static auto closed_error(const char* msg) -> Result<Unit>
+    {
+        return Err(SystemError { .code = std::make_error_code(std::errc::broken_pipe),
+                                 .message = msg,
+                                 .location = std::source_location::current() });
+    }
+
+    static auto full_error() -> Result<Unit>
+    {
+        return Err(SystemError { .code = std::make_error_code(std::errc::resource_unavailable_try_again),
+                                 .message = "send on full channel",
+                                 .location = std::source_location::current() });
+    }
+
+    // 入队：CAS 推进 enqueue_pos，成功后写入元素并发布序号。失败（满）时不移动 value。
+    auto try_push(T&& value) -> bool
+    {
+        usize pos = enqueue_pos_.load(std::memory_order_relaxed);
+        while (true) {
+            Cell& cell = cells_[pos % capacity_];
+            const usize seq = cell.seq.load(std::memory_order_acquire);
+            const auto dif = static_cast<isize>(seq) - static_cast<isize>(pos);
+            if (dif == 0) {
+                if (enqueue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
+                    cell.data.emplace(std::move(value));
+                    cell.seq.store(pos + 1, std::memory_order_release);
+                    size_.fetch_add(1, std::memory_order_relaxed);
+                    return true;
+                }
+            } else if (dif < 0) {
+                return false; // 满
+            } else {
+                pos = enqueue_pos_.load(std::memory_order_relaxed);
+            }
+        }
+    }
+
+    // 出队：CAS 推进 dequeue_pos，取走元素并把 cell 序号重置为下一轮可用。
+    auto try_pop() -> std::optional<T>
+    {
+        usize pos = dequeue_pos_.load(std::memory_order_relaxed);
+        while (true) {
+            Cell& cell = cells_[pos % capacity_];
+            const usize seq = cell.seq.load(std::memory_order_acquire);
+            const auto dif = static_cast<isize>(seq) - static_cast<isize>(pos + 1);
+            if (dif == 0) {
+                if (dequeue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
+                    T value = std::move(*cell.data);
+                    cell.data.reset();
+                    cell.seq.store(pos + capacity_, std::memory_order_release);
+                    size_.fetch_sub(1, std::memory_order_relaxed);
+                    return value;
+                }
+            } else if (dif < 0) {
+                return std::nullopt; // 空
+            } else {
+                pos = dequeue_pos_.load(std::memory_order_relaxed);
+            }
+        }
+    }
+
+    // 空锁段 + notify：与 wait 侧配对，避免“检查后、入睡前”的唤醒丢失。
+    auto notify(std::condition_variable& cv) -> void
+    {
+        {
+            std::lock_guard lock(wait_mutex_);
+        }
+        cv.notify_one();
+    }
+
+    usize capacity_;
+    std::vector<Cell> cells_;
+    alignas(64) std::atomic<usize> enqueue_pos_ { 0 };
+    alignas(64) std::atomic<usize> dequeue_pos_ { 0 };
+    std::atomic<usize> size_ { 0 };
+    std::atomic<bool> closed_ { false };
+    mutable std::mutex wait_mutex_;
     std::condition_variable not_empty_;
     std::condition_variable not_full_;
-    std::queue<T> queue_;
-    usize capacity_;
-    bool closed_ = false;
 };
+
 template<typename T>
 [[nodiscard]] auto make_channel(usize capacity = 0) -> Channel<T>
 {
     return Channel<T>(capacity);
 }
+
 } // namespace rain::sync
