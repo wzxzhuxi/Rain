@@ -9,7 +9,6 @@
 #include <optional>
 
 namespace rain::async {
-
 using Clock = std::chrono::steady_clock;
 using TimePoint = Clock::time_point;
 using Duration = Clock::duration;
@@ -80,5 +79,4 @@ concept TimerLike = requires(T t, Duration d, std::coroutine_handle<> h, TimerId
     { t.tick() } -> std::same_as<u32>;
     { t.next_deadline() } -> std::same_as<std::optional<TimePoint>>;
 };
-
 } // namespace rain::async
