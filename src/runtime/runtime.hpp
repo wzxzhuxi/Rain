@@ -1,6 +1,5 @@
 #pragma once
 
-#include "core/diagnostics.hpp"
 #include "core/result.hpp"
 #include "core/types.hpp"
 
@@ -14,146 +13,80 @@
 #include <optional>
 
 namespace rain::runtime {
-
-// ── 线程局部：阻塞线程池指针 ─────────────────────────────────────────
-// 由 Runtime 在每个工作线程启动时安装，使全局 spawn_blocking
-// 无需手动传递 ThreadPool 引用。
-
+// 每工作线程的阻塞池指针；Runtime 启动时安装，全局 spawn_blocking 据此取池。
 inline thread_local ThreadPool* g_thread_pool = nullptr;
 
 namespace detail {
-
-// 在协程帧被事件循环回收前，把结果搬到调用方栈上的存储里，
-// 避免 block_on 在 run() 销毁帧之后读取 promise（use-after-free）。
+// 在事件循环回收协程帧前把结果搬到调用方栈上，避免 block_on 读已销毁的 promise。
 template<typename T>
 inline auto capture_into(std::optional<Result<T>>& out, async::JoinHandle<T> handle) -> async::Task<Unit>
 {
     out = co_await std::move(handle);
     co_return unit;
 }
-
 } // namespace detail
 
-// ── 运行时（Runtime）────────────────────────────────────────────────
-// 通用异步运行时底座。统一持有 Executor（异步任务）和 ThreadPool
-// （阻塞任务），提供 block_on（单线程入口）和 run（多核入口）。
-//
-// 用法：
-//   auto rt = Runtime::builder()
-//       .worker_threads(4)
-//       .blocking_threads(8)
-//       .build();
-//
-//   // 单线程入口
-//   auto result = rt->block_on(my_async_task());
-//
-//   // 多核入口
-//   rt->run([](async::EventLoop& loop, usize) -> Result<Unit> {
-//       loop.spawn(my_task());
-//       return Ok();
-//   });
-//   rt->executor().join();
-
+// 统一持有 Executor（异步）与 ThreadPool（阻塞），提供 block_on 与多核 run 两个入口。
 class Runtime {
 public:
     class Builder;
-
     Runtime(const Runtime&) = delete;
     auto operator=(const Runtime&) -> Runtime& = delete;
     Runtime(Runtime&&) = default;
     auto operator=(Runtime&&) -> Runtime& = delete;
-
     [[nodiscard]] static auto builder() -> Builder;
 
-    // ── 单线程同步入口 ─────────────────────────────────────────────
-    // 在当前线程创建临时 EventLoop，运行 task 直到完成。
-    // 适用于 main()、测试、简单脚本。
-
+    // 当前线程建临时 EventLoop，把 task 跑完。
     template<typename T>
     [[nodiscard]] auto block_on(async::Task<T> task) -> T
     {
         auto loop_result = async::EventLoop::create();
         if (!loop_result) {
-            if constexpr (async::detail::is_result<T>::value) {
+            if constexpr (async::detail::is_result<T>::value)
                 return T(Err(std::move(loop_result).error()));
-            } else {
-                std::abort(); // 非 Result 任务无错误通道，无法传播创建失败
-            }
+            else
+                std::abort(); // 非 Result 任务无错误通道
         }
 
         auto& loop = *loop_result;
         auto handle = loop.spawn_with_handle(std::move(task));
         std::optional<Result<T>> slot;
         loop.spawn(detail::capture_into(slot, std::move(handle)));
-
-        // 单线程路径也安装每核诊断计数器，否则 block_on / 单元测试 / 脚本完全失明。
-        diag::CoreMetrics metrics;
-        diag::g_metrics = &metrics;
-        diag::MetricsRegistry::instance().add(&metrics);
         g_thread_pool = pool_ ? &*pool_ : nullptr;
-        auto run_result = loop.run();
+        (void)loop.run();
         g_thread_pool = nullptr;
-        if (!run_result) {
-            diag::count(&diag::CoreMetrics::loop_run_errors);
-            diag::emit({ .code = "block_on.run_failed",
-                         .severity = diag::Severity::Error,
-                         .error = &run_result.error() });
-        }
-        diag::MetricsRegistry::instance().remove(&metrics);
-        diag::g_metrics = nullptr;
-
         auto result = std::move(slot).value_or(Err(async::make_cancelled_error()));
         if constexpr (async::detail::is_result<T>::value) {
-            if (!result) {
+            if (!result)
                 return T(Err(std::move(result).error()));
-            }
             return std::move(*result);
         } else {
-            if (!result) {
-                std::abort(); // 未完成/被取消，非 Result 任务无法返回有效值
-            }
+            if (!result)
+                std::abort(); // 未完成/被取消，非 Result 任务无值可返
             return std::move(*result);
         }
     }
 
-    // ── 多核入口 ───────────────────────────────────────────────────
-    // 启动 Executor 全部工作线程。setup 在每核上调用一次。
-    // 每个工作线程自动安装 g_thread_pool。
-
+    // 启动全部工作线程；setup 在每核调用一次，且每线程自动安装 g_thread_pool。
     [[nodiscard]] auto run(Executor::SetupFn setup) -> Result<Unit>
     {
         ThreadPool* pool_ptr = pool_ ? &*pool_ : nullptr;
-
-        executor_.on_thread_init([pool_ptr](usize) {
-            g_thread_pool = pool_ptr;
-        });
-
+        executor_.on_thread_init([pool_ptr](usize) { g_thread_pool = pool_ptr; });
         return executor_.run(std::move(setup));
     }
 
-    // ── 访问内部组件 ─────────────────────────────────────────────
-
     [[nodiscard]] auto executor() -> Executor& { return executor_; }
     [[nodiscard]] auto executor() const -> const Executor& { return executor_; }
-
-    [[nodiscard]] auto thread_pool() -> ThreadPool&
-    {
-        return *pool_;
-    }
-
+    [[nodiscard]] auto thread_pool() -> ThreadPool& { return *pool_; }
     [[nodiscard]] auto has_thread_pool() const noexcept -> bool { return pool_ != nullptr; }
-
     [[nodiscard]] auto core_count() const noexcept -> usize { return executor_.core_count(); }
 
     auto stop() -> Unit { return executor_.stop(); }
-
-    // 优雅停机：停 accept、在途 drain；deadline 兜底硬停。见 Executor::graceful_stop。
     auto request_graceful_stop() -> Unit { return executor_.request_graceful_stop(); }
     [[nodiscard]] auto graceful_stop(async::Duration deadline) -> Result<Unit>
     {
         return executor_.graceful_stop(deadline);
     }
-
     [[nodiscard]] auto join() -> Result<Unit> { return executor_.join(); }
 
     auto stop_and_join() -> Unit
@@ -164,15 +97,11 @@ public:
     }
 
 private:
-    Runtime(Executor executor, Box<ThreadPool> pool)
-        : executor_(std::move(executor)), pool_(std::move(pool))
-    { }
+    Runtime(Executor executor, Box<ThreadPool> pool) : executor_(std::move(executor)), pool_(std::move(pool)) { }
 
     Executor executor_;
     Box<ThreadPool> pool_;
 };
-
-// ── 构建器（Runtime::Builder）───────────────────────────────────────
 
 class Runtime::Builder {
 public:
@@ -203,15 +132,11 @@ public:
     [[nodiscard]] auto build() -> Result<Runtime>
     {
         auto executor = Executor::create(workers_);
-        if (!executor) {
+        if (!executor)
             return Err(std::move(executor).error());
-        }
-
         Box<ThreadPool> pool;
-        if (enable_blocking_) {
+        if (enable_blocking_)
             pool = std::make_unique<ThreadPool>(blockers_, queue_cap_);
-        }
-
         return Ok(Runtime(std::move(*executor), std::move(pool)));
     }
 
@@ -224,15 +149,12 @@ private:
 
 inline auto Runtime::builder() -> Runtime::Builder { return Builder { }; }
 
-// ── 全局便捷函数 ────────────────────────────────────────────────────
-// 读取 thread-local，在任何协程内可直接调用。
-
+// 读取线程局部的全局便捷函数，可在任意协程内直接调用。
 template<typename T>
 auto spawn(async::Task<T> task) -> Unit
 {
-    if (async::g_event_loop) {
+    if (async::g_event_loop)
         async::g_event_loop->spawn(std::move(task));
-    }
     return unit;
 }
 
@@ -255,5 +177,4 @@ template<typename T>
 {
     return target.submit(std::move(task));
 }
-
 } // namespace rain::runtime

@@ -13,22 +13,12 @@
 #include <vector>
 
 namespace rain::runtime {
-
-// ── 常量 ─────────────────────────────────────────────────────────────
-
 static constexpr usize kDefaultTaskQueueCapacity = 1024;
 static constexpr usize kFallbackThreadCount = 1;
-
-// ── 异常处理器（ExceptionHandler）────────────────────────────────────
-// ThreadPool 使用 std::future/packaged_task，这些机制天然会抛异常。
-// 该处理器用于捕获“即发即弃”（spawn）任务中的异常。
-
 using ExceptionHandler = std::move_only_function<void(std::exception_ptr)>;
 
 inline auto default_exception_handler(std::exception_ptr eptr) -> void
 {
-    // 最后兜底写入 stderr——log/ 位于更高层。
-    // 生产环境可通过构造参数替换该处理器。
     try {
         std::rethrow_exception(eptr);
     } catch (const std::exception& e) {
@@ -38,11 +28,8 @@ inline auto default_exception_handler(std::exception_ptr eptr) -> void
     }
 }
 
-// ── 线程池（ThreadPool）──────────────────────────────────────────────
-// 面向 CPU 密集型任务的执行器。它位于 runtime/（第 3 层），因为它是
-// 执行基础设施，而不是同步原语。
-// 内部使用 sync::Channel 分发任务。
-
+// 面向阻塞/CPU 任务的线程池，内部用 sync::Channel 分发任务。
+// 用 future/packaged_task 是因为它天然支持带返回值的提交；异常由 on_error_ 兜底。
 class ThreadPool {
 public:
     explicit ThreadPool(usize num_threads = default_thread_count(),
@@ -51,9 +38,8 @@ public:
         : tasks_(queue_capacity), on_error_(std::move(on_error))
     {
         workers_.reserve(num_threads);
-        for (usize i = 0; i < num_threads; ++i) {
+        for (usize i = 0; i < num_threads; ++i)
             workers_.emplace_back([this] { worker_loop(); });
-        }
     }
 
     ~ThreadPool() { shutdown(); }
@@ -63,9 +49,7 @@ public:
     ThreadPool(ThreadPool&&) = delete;
     auto operator=(ThreadPool&&) -> ThreadPool& = delete;
 
-    // 通过 future 提交任务——适用于调用方需要返回值的场景。
-    // 使用 std::future 的原因是 ThreadPool 早于 async 层出现，且
-    // std::packaged_task 天然依赖异常支持。
+    // 通过 future 提交任务——调用方需要返回值时使用。
     template<typename F, typename... Args>
         requires std::invocable<F, Args...>
     [[nodiscard]] auto submit(F&& f, Args&&... args) -> Result<std::future<std::invoke_result_t<F, Args...>>>
@@ -75,15 +59,12 @@ public:
             std::bind(std::forward<F>(f), std::forward<Args>(args)...));
         auto future = task->get_future();
         auto send_result = tasks_.send([task = std::move(task)]() mutable { (*task)(); });
-        if (!send_result) {
+        if (!send_result)
             return Err(std::move(send_result).error());
-        }
         return Ok(std::move(future));
     }
 
-    // 即发即弃——适用于调用方不需要结果的任务。
-    // 非阻塞入队：队列满时返回 Err 而非阻塞。spawn_blocking 在事件循环线程上
-    // 调用此函数，阻塞会冻结整个核心，故必须用 try_send 把背压暴露为错误。
+    // 即发即弃：非阻塞入队；队列满时返回 Err（调用方常在事件循环线程上，不能阻塞）。
     template<typename F>
         requires std::invocable<F>
     [[nodiscard]] auto spawn(F&& f) -> Result<Unit>
@@ -95,11 +76,9 @@ public:
     {
         if (!shutdown_.exchange(true)) {
             tasks_.close();
-            for (auto& worker : workers_) {
-                if (worker.joinable()) {
+            for (auto& worker : workers_)
+                if (worker.joinable())
                     worker.join();
-                }
-            }
         }
         return unit;
     }
@@ -138,5 +117,4 @@ private:
 {
     return ThreadPool(num_threads, queue_capacity);
 }
-
 } // namespace rain::runtime
