@@ -36,7 +36,8 @@ namespace detail {
 } // namespace detail
 
 // epoll 封装：fd 作下标的稠密槽位表，0 哈希、0 节点分配。
-// 每次就绪后按仍挂起的方向重新武装（EPOLLONESHOT），空闲槽留在原位复用。
+// 数据 fd 首次使用时以 Read|Write|EdgeTrig 持久注册；就绪不再重新武装，
+// 等待者只维护槽位，取消清槽，关闭才 DEL。
 class EpollReactor {
 public:
     static constexpr usize kMaxEventsPerPoll = 256;
@@ -102,9 +103,12 @@ public:
             if (fd < 0 || static_cast<usize>(fd) >= slots_.size())
                 continue;
             auto& e = slots_[static_cast<usize>(fd)];
-            if (!e.read && !e.write)
-                continue;
             const bool err = (ep & (EPOLLERR | EPOLLHUP)) != 0;
+            if (!e.read && !e.write) {
+                if (err && e.registered)
+                    (void)remove(fd); // HUP/ERR 是持续状态，移除避免空转
+                continue;
+            }
             // 错误/挂断唤醒两个方向，否则按 EPOLLIN/EPOLLOUT 分派。
             if (e.read && ((ep & EPOLLIN) || err)) {
                 if (fire(*e.read))
@@ -116,7 +120,8 @@ public:
                     ++completed;
                 e.write.reset();
             }
-            (void)rearm_or_erase(fd);
+            if (err && !e.read && !e.write && e.registered)
+                (void)remove(fd);
         }
         return Ok(completed);
     }
@@ -145,23 +150,21 @@ public:
 
     auto deregister(i32 fd) -> Unit
     {
-        clear_slot(fd);
+        (void)remove(fd);
         return unit;
     }
 
-    // 仅注销指定方向；另一方向仍挂起则重新武装，否则槽位回到空闲态。
+    // 仅清指定方向的等待者；持久注册保留，下一次等待无需 epoll_ctl。
     auto deregister(i32 fd, IoEvent dir) -> Unit
     {
         if (fd < 0 || static_cast<usize>(fd) >= slots_.size())
             return unit;
         auto& e = slots_[static_cast<usize>(fd)];
-        if (!e.read && !e.write)
-            return unit;
         if (has_flag(dir, IoEvent::Read))
             e.read.reset();
         if (has_flag(dir, IoEvent::Write))
             e.write.reset();
-        return rearm_or_erase(fd);
+        return unit;
     }
 
     [[nodiscard]] auto drain_ready() -> std::vector<std::coroutine_handle<>> { return std::exchange(ready_, { }); }
@@ -201,6 +204,7 @@ private:
     struct FdEntry {
         std::optional<PendingEntry> read;
         std::optional<PendingEntry> write;
+        bool registered = false;
     };
 
     explicit EpollReactor(i32 epoll_fd) : epoll_fd_(epoll_fd), events_(kMaxEventsPerPoll) { }
@@ -220,6 +224,24 @@ private:
         return Ok();
     }
 
+    [[nodiscard]] auto register_persistent(i32 fd) -> Result<Unit>
+    {
+        struct epoll_event ev { };
+        ev.events = detail::to_epoll_events(IoEvent::Read | IoEvent::Write | IoEvent::EdgeTrig);
+        ev.data.fd = fd;
+        if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) == 0)
+            return Ok();
+        const int err = errno;
+        if (err != EEXIST) {
+            return Err(SystemError { .code = std::error_code(err, std::system_category()),
+                                     .message = std::system_category().message(err),
+                                     .location = std::source_location::current() });
+        }
+        if (::epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev) == 0)
+            return Ok();
+        return Err(SystemError::from_errno());
+    }
+
     [[nodiscard]] auto register_io(bool write_dir, i32 fd, std::coroutine_handle<> h, Result<usize>* result_ptr,
                                    WaitState* state, WaitState completion) -> Result<Unit>
     {
@@ -231,16 +253,12 @@ private:
         if (slot)
             return Err(error(std::errc::device_or_resource_busy,
                 write_dir ? "register_write: write already pending on fd" : "register_read: read already pending on fd"));
-        slot = PendingEntry { .handle = h, .result = result_ptr, .state = state, .completion = completion };
-        IoEvent interest = (write_dir ? IoEvent::Write : IoEvent::Read) | IoEvent::EdgeTrig | IoEvent::OneShot;
-        if (entry.read)
-            interest = interest | IoEvent::Read;
-        if (entry.write)
-            interest = interest | IoEvent::Write;
-        if (auto reg = ensure(fd, interest); !reg) {
-            slot.reset();
-            return Err(std::move(reg).error());
+        if (!entry.registered) {
+            if (auto reg = register_persistent(fd); !reg)
+                return Err(std::move(reg).error());
+            entry.registered = true;
         }
+        slot = PendingEntry { .handle = h, .result = result_ptr, .state = state, .completion = completion };
         return Ok();
     }
 
@@ -261,23 +279,6 @@ private:
         return false;
     }
 
-    // EPOLLONESHOT 每次事件后失效：按仍挂起的方向重新武装；无挂起则槽位留待复用。
-    auto rearm_or_erase(i32 fd) -> Unit
-    {
-        if (fd < 0 || static_cast<usize>(fd) >= slots_.size())
-            return unit;
-        auto& e = slots_[static_cast<usize>(fd)];
-        if (!e.read && !e.write)
-            return unit;
-        IoEvent interest = IoEvent::EdgeTrig | IoEvent::OneShot;
-        if (e.read)
-            interest = interest | IoEvent::Read;
-        if (e.write)
-            interest = interest | IoEvent::Write;
-        (void)ensure(fd, interest);
-        return unit;
-    }
-
     [[nodiscard]] auto ensure_slot(i32 fd) -> FdEntry&
     {
         const auto idx = static_cast<usize>(fd);
@@ -294,16 +295,8 @@ private:
         if (idx < slots_.size()) {
             slots_[idx].read.reset();
             slots_[idx].write.reset();
+            slots_[idx].registered = false;
         }
-    }
-
-    [[nodiscard]] auto ensure(i32 fd, IoEvent events) -> Result<Unit>
-    {
-        if (auto mod = ctl(EPOLL_CTL_MOD, fd, events); mod)
-            return Ok();
-        if (errno != ENOENT)
-            return Err(SystemError::from_errno());
-        return ctl(EPOLL_CTL_ADD, fd, events);
     }
 
     i32 epoll_fd_ = -1;

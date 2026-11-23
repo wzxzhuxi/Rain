@@ -44,7 +44,7 @@ auto main() -> int
     TK_CHECK(ctx, wr.has_value());
     TK_CHECK(ctx, !rr.has_value());
 
-    // 写入对端使 sv[0] 可读；存活的读方向应在 ONESHOT 重新武装后触发。
+    // 写入对端使 sv[0] 可读；持久 ET 注册下，读方向仍保持挂起并被唤醒。
     const char c = 'x';
     TK_CHECK(ctx, ::write(sv[1], &c, 1) == 1);
     (void)rx->poll(milliseconds(50));
