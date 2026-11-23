@@ -13,8 +13,8 @@ permalink: /reading-map/
 阅读 Rain 更适合按源码层级展开：
 
 1. `core`：类型系统、`Result`、错误模型
-2. `sync`：`Channel`、`SpinLock`
-3. `async`：`Task`、`EpollReactor`、`EventLoop`、时间轮、信号、组合子
+2. `sync`：无锁有界 MPMC `Channel`
+3. `async`：`Task`、`EpollReactor`、`EventLoop`、定时器、组合子
 4. `runtime`：`Executor`、`ThreadPool`、`Bridge`、`Runtime`
 5. `net`：地址、监听器、TCP 流与 I/O awaiter
 
@@ -30,7 +30,6 @@ permalink: /reading-map/
 
 - `src/async/io_reactor.hpp`
 - `src/async/timer.hpp`
-- `src/async/signal.hpp`
 - `src/async/event_loop.hpp`
 
 ### 第三轮：运行时编排
@@ -55,7 +54,6 @@ permalink: /reading-map/
 | `read` / `write` | `net/stream_io_ops.hpp` | 非阻塞 TCP 收发 |
 | `socket` / `bind` / `listen` / `accept` | `net/` | TCP 生命周期 |
 | `eventfd` | `runtime/bridge.hpp`、`async/event_loop.hpp` | 跨线程与跨核唤醒 |
-| `signalfd` | `async/signal.hpp` | 把信号整合进 epoll |
 | `sendfile` | `net/stream_io_ops.hpp` | 零拷贝文件发送 |
 | `sigaction` | `runtime/executor.hpp` | 忽略 `SIGPIPE` |
 

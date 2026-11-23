@@ -6,7 +6,7 @@
 
 <p align="center"><strong>C++23 异步运行时</strong></p>
 
-<p align="center">每核事件循环 · 协程任务 · epoll reactor · 层次时间轮 · ThreadPool · spawn_blocking bridge</p>
+<p align="center">每核事件循环 · 协程任务 · epoll reactor · 有序表定时器 · ThreadPool · spawn_blocking bridge</p>
 
 <p align="center">
   <img alt="C++23" src="https://img.shields.io/badge/C%2B%2B-23-111827?style=flat-square">
@@ -26,7 +26,7 @@
 
 文档站链接:[Rain](https://wzxzhuxi.github.io/Rain/)
 
-Rain 是一个面向 Linux 的 C++23 异步运行时，核心由每核事件循环、协程任务、epoll reactor、层次时间轮、线程池和同步-异步桥接组成。
+Rain 是一个面向 Linux 的 C++23 异步运行时，核心由每核事件循环、协程任务、epoll reactor、有序表定时器、线程池和同步-异步桥接组成。
 
 | 方向 | 内容 |
 | --- | --- |
@@ -71,22 +71,21 @@ Rain 之所以能在这组测试里超过 Tokio，主要原因是它没有采用
 
 ```text
 src/
-├── core/       类型别名、Result<T, E>、概念约束
-├── sync/       Channel、SpinLock
-├── async/      Task、EventLoop、EpollReactor、时间轮、信号、组合子
+├── core/       类型别名、Result<T, E>
+├── sync/       无锁有界 MPMC Channel
+├── async/      Task、EventLoop、EpollReactor、定时器、组合子
 ├── runtime/    Runtime、Executor、ThreadPool、spawn_blocking 桥接
-├── net/        TcpListener、TcpStream、地址、I/O awaiter
-└── fs/         thread-pool-backed 文件系统 API
+└── net/        TcpListener、TcpStream、地址、I/O awaiter
 ```
 
 层级依赖严格自上而下：
 
 ```text
-Layer 0  core/       基础：类型别名、Result、概念
-Layer 1  sync/       同步原语：Channel、SpinLock
-Layer 2  async/      运行时核心：Task、EventLoop、epoll、定时器、信号
+Layer 0  core/       基础：类型别名、Result
+Layer 1  sync/       无锁有界 MPMC Channel
+Layer 2  async/      运行时核心：Task、EventLoop、epoll、定时器、组合子
 Layer 3  runtime/    编排：Runtime、Executor、ThreadPool、Bridge
-Layer 4  net/ fs/    网络与文件系统：TCP I/O、blocking-pool 文件 I/O
+Layer 4  net/        TCP 网络 I/O
 ```
 
 ## 快速开始
@@ -198,7 +197,7 @@ cmake --build build
 ## 环境要求
 
 - C++23（GCC 13+ 或 Clang 17+）
-- Linux（`epoll`、`eventfd`、`signalfd`）
+- Linux（`epoll`、`eventfd`、`sendfile`）
 - CMake 3.28+
 
 ## 核心设计
@@ -206,7 +205,7 @@ cmake --build build
 - 每核无共享：每个核心运行独立的 `EventLoop`、reactor 和 timer，热路径不共享状态。
 - `Result<T, E>` 贯穿全局：不依赖异常作为控制流，错误统一显式传播。
 - 惰性协程 + 对称转移：`Task<T>` 创建即挂起，`final_suspend` 通过 continuation 做零额外栈增长的协程切换。
-- 层次时间轮：4 层结构，插入和取消保持 O(1) 级别。
+- 简化定时器：以 deadline 为键的有序表，tick 推进 1ms；cancel 急切移除，无墓碑与 UAF。
 - `spawn_blocking`：通过 `ThreadPool + eventfd` 把阻塞任务卸载出去，再唤醒原事件循环继续执行。
 - 跨核任务提交：`EventLoop::submit()` 支持显式把任务投递到指定核心。
 
@@ -214,18 +213,17 @@ cmake --build build
 
 | 组件 | 文件 | 作用 |
 | --- | --- | --- |
+| `Channel<T>` | `src/sync/channel.hpp` | 无锁有界 MPMC 队列 |
 | `Task<T>` | `src/async/task.hpp` | 惰性协程、对称转移、协作式取消 |
 | `EventLoop` | `src/async/event_loop.hpp` | 每核调度器：ready queue + epoll + timer + submit |
 | `EpollReactor` | `src/async/io_reactor.hpp` | epoll 封装与 I/O awaiter 支撑 |
-| `HierarchicalTimerWheel` | `src/async/timer.hpp` | 层次时间轮 |
+| `HierarchicalTimerWheel` | `src/async/timer.hpp` | 有序表定时器（教学版） |
 | `Executor` | `src/runtime/executor.hpp` | 多核 EventLoop 编排 |
 | `ThreadPool` | `src/runtime/thread_pool.hpp` | 阻塞任务线程池 |
 | `Bridge` | `src/runtime/bridge.hpp` | `spawn_blocking()` 的同步-异步桥接 |
 | `Runtime` | `src/runtime/runtime.hpp` | 统一运行时入口 |
 | `TcpListener` | `src/net/tcp_listener.hpp` | 异步 accept |
 | `TcpStream` | `src/net/tcp_stream.hpp` | 异步读写与 sendfile |
-| `fs::ops` | `src/fs/ops.hpp` | 基于 `spawn_blocking` 的路径级文件读写、metadata |
-| `fs::File` | `src/fs/file.hpp` | 基于 `pread/pwrite` 的偏移文件 I/O |
 
 ## 许可证
 

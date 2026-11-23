@@ -43,8 +43,6 @@ permalink: /api/
 | `loop.run()` | 进入事件循环主循环，直到请求停止或所有任务完成。 |
 | `loop.run_until_complete(task)` | 把单个主任务投递进去并运行到完成。 |
 | `loop.request_stop()` | 请求 loop 停止。 |
-| `loop.add_signals({...})` | 配置 `signalfd` 信号集合。 |
-| `loop.wait_signal()` | 等待一个信号事件。 |
 | `loop.reactor()` / `loop.timer()` | 访问当前 loop 绑定的 reactor 与 timer。 |
 
 ## 组合子：`rain::async`
@@ -128,7 +126,7 @@ Rain 在运行中的 worker 线程上自动安装这些 thread-local 指针：
 | API | 作用 |
 | --- | --- |
 | `rain::async::g_reactor` | 当前核心的 reactor。 |
-| `rain::async::g_timer` | 当前核心的时间轮。 |
+| `rain::async::g_timer` | 当前核心的定时器。 |
 | `rain::async::g_event_loop` | 当前核心的 EventLoop。 |
 | `rain::runtime::g_thread_pool` | 当前线程可用的阻塞线程池。 |
 

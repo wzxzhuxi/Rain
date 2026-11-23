@@ -7,7 +7,7 @@ permalink: /
 <section class="home-hero">
   <p class="home-kicker">C++23 异步运行时</p>
   <h1>Rain</h1>
-  <p class="home-tagline">每核事件循环、协程任务、epoll reactor、层次时间轮与阻塞桥接组成的轻量运行时库。</p>
+  <p class="home-tagline">每核事件循环、协程任务、epoll reactor、有序表定时器与阻塞桥接组成的轻量运行时库。</p>
   <div class="home-actions">
     <a class="btn brand" href="{{ '/install-and-usage/' | relative_url }}">安装与使用</a>
     <a class="btn alt" href="{{ '/api/' | relative_url }}">API 文档</a>

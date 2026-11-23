@@ -13,7 +13,7 @@ permalink: /install-and-usage/
 - GCC 13+ 或 Clang 17+
 - CMake 3.28+
 - GNU Make 或 Ninja
-- Linux（当前运行时依赖 `epoll`、`eventfd`、`signalfd`）
+- Linux（当前运行时依赖 `epoll`、`eventfd`、`sendfile`）
 
 ## 构建
 

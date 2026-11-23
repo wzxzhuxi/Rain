@@ -24,11 +24,11 @@ core -> sync -> async -> runtime -> net
 
 ### `sync`
 
-提供 `Channel` 和 `SpinLock` 这类同步原语，服务于线程池、跨线程提交和轻量同步场景。
+提供无锁有界 MPMC `Channel`，作为线程池任务队列与跨线程消息传递原语；满/空时用条件变量协调阻塞。
 
 ### `async`
 
-Rain 的核心：`Task`、`EventLoop`、`EpollReactor`、时间轮、信号、组合子都在这里。
+Rain 的核心：`Task`、`EventLoop`、`EpollReactor`、定时器、组合子都在这里。
 
 ### `runtime`
 
@@ -45,7 +45,7 @@ Rain 的核心：`Task`、`EventLoop`、`EpollReactor`、时间轮、信号、�
 | `Task<T>` | `src/async/task.hpp` | 惰性协程、对称转移、协作式取消 |
 | `EventLoop` | `src/async/event_loop.hpp` | 每核调度器：ready queue + epoll + timer + submit |
 | `EpollReactor` | `src/async/io_reactor.hpp` | 边缘触发 + oneshot epoll 封装 |
-| `HierarchicalTimerWheel` | `src/async/timer.hpp` | O(1) 插入/取消的时间轮 |
+| `HierarchicalTimerWheel` | `src/async/timer.hpp` | 有序表定时器（教学版） |
 | `Executor` | `src/runtime/executor.hpp` | 多核 EventLoop 编排 |
 | `ThreadPool` | `src/runtime/thread_pool.hpp` | 基于 Channel 的阻塞任务线程池 |
 | `Bridge` | `src/runtime/bridge.hpp` | `spawn_blocking` 同步-异步桥接 |

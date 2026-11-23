@@ -6,7 +6,7 @@
 
 <p align="center"><strong>C++23 Async Runtime</strong></p>
 
-<p align="center">Per-core EventLoop · Coroutine Tasks · epoll Reactor · Hierarchical Timer Wheel · ThreadPool · spawn_blocking bridge</p>
+<p align="center">Per-core EventLoop · Coroutine Tasks · epoll Reactor · Ordered-Map Timer · ThreadPool · spawn_blocking bridge</p>
 
 <p align="center">
   <a href="README.md">中文</a> ·
@@ -25,7 +25,7 @@
 
 Documentation site: [Rain](https://wzxzhuxi.github.io/Rain/)
 
-Rain is a Linux-oriented C++23 async runtime built around per-core event loops, coroutine tasks, an epoll reactor, a hierarchical timer wheel, a thread pool, and a sync-async bridge.
+Rain is a Linux-oriented C++23 async runtime built around per-core event loops, coroutine tasks, an epoll reactor, an ordered-map timer, a thread pool, and a sync-async bridge.
 
 The goal is not to maximize features. The goal is to keep the runtime small enough that each component can be read and understood in isolation.
 
@@ -72,22 +72,21 @@ Does that mean Rain cannot hand work across cores at all? Also no. When cross-co
 
 ```text
 src/
-├── core/       type aliases, Result<T, E>, concepts
-├── sync/       Channel, SpinLock
-├── async/      Task, EventLoop, EpollReactor, timer wheel, signal, combinators
+├── core/       type aliases, Result<T, E>
+├── sync/       Lock-free bounded MPMC Channel
+├── async/      Task, EventLoop, EpollReactor, timer, combinators
 ├── runtime/    Runtime, Executor, ThreadPool, spawn_blocking bridge
-├── net/        TcpListener, TcpStream, address, I/O awaiters
-└── fs/         thread-pool-backed filesystem APIs
+└── net/        TcpListener, TcpStream, address, I/O awaiters
 ```
 
 Layer dependencies are strictly top-down:
 
 ```text
-Layer 0  core/       Foundation: type aliases, Result, concepts
-Layer 1  sync/       Primitives: Channel, SpinLock
-Layer 2  async/      Runtime core: Task, EventLoop, epoll, timers, signals
+Layer 0  core/       Foundation: type aliases, Result
+Layer 1  sync/       Lock-free bounded MPMC Channel
+Layer 2  async/      Runtime core: Task, EventLoop, epoll, timers, combinators
 Layer 3  runtime/    Orchestration: Runtime, Executor, ThreadPool, Bridge
-Layer 4  net/ fs/    Network and filesystem: TCP I/O, blocking-pool file I/O
+Layer 4  net/        TCP network I/O
 ```
 
 ## Quick Start
@@ -199,7 +198,7 @@ cmake --build build
 ## Requirements
 
 - C++23 (GCC 13+ or Clang 17+)
-- Linux (`epoll`, `eventfd`, `signalfd`)
+- Linux (`epoll`, `eventfd`, `sendfile`)
 - CMake 3.28+
 
 ## Key Design Points
@@ -207,7 +206,7 @@ cmake --build build
 - Per-core shared-nothing: each core owns its own `EventLoop`, reactor, and timer.
 - `Result<T, E>` everywhere: no exceptions as control flow.
 - Lazy coroutines with symmetric transfer: `Task<T>` starts suspended and resumes through continuation chaining.
-- Hierarchical timer wheel: four-level O(1)-style timer management.
+- Simplified timer: a deadline-ordered map advanced 1 ms per tick; cancellation removes eagerly with no tombstones or UAF.
 - `spawn_blocking`: blocking work is offloaded through `ThreadPool + eventfd` and resumed on the original event loop.
 - Cross-core submission: `EventLoop::submit()` lets the caller explicitly push work to another core.
 
@@ -215,18 +214,17 @@ cmake --build build
 
 | Component | File | Purpose |
 | --- | --- | --- |
+| `Channel<T>` | `src/sync/channel.hpp` | Lock-free bounded MPMC queue |
 | `Task<T>` | `src/async/task.hpp` | Lazy coroutine, symmetric transfer, cooperative cancellation |
 | `EventLoop` | `src/async/event_loop.hpp` | Per-core scheduler: ready queue + epoll + timer + submit |
 | `EpollReactor` | `src/async/io_reactor.hpp` | epoll wrapper and I/O awaiter support |
-| `HierarchicalTimerWheel` | `src/async/timer.hpp` | Hierarchical timer wheel |
+| `HierarchicalTimerWheel` | `src/async/timer.hpp` | Ordered-map timer (teaching version) |
 | `Executor` | `src/runtime/executor.hpp` | Multi-core EventLoop orchestration |
 | `ThreadPool` | `src/runtime/thread_pool.hpp` | Blocking task execution pool |
 | `Bridge` | `src/runtime/bridge.hpp` | Sync-async bridge behind `spawn_blocking()` |
 | `Runtime` | `src/runtime/runtime.hpp` | Unified runtime entry |
 | `TcpListener` | `src/net/tcp_listener.hpp` | Async accept |
 | `TcpStream` | `src/net/tcp_stream.hpp` | Async read/write and sendfile |
-| `fs::ops` | `src/fs/ops.hpp` | Path-based file read/write and metadata via `spawn_blocking` |
-| `fs::File` | `src/fs/file.hpp` | Offset file I/O backed by `pread/pwrite` |
 
 ## License
 
