@@ -2,13 +2,15 @@
 
 #include "types.hpp"
 
+#include <cerrno>
 #include <expected>
 #include <format>
 #include <source_location>
 #include <system_error>
+#include <utility>
 
 namespace rain {
-
+// 错误即值：所有可失败操作都返回 Result<T>，不使用异常做控制流。
 struct SystemError {
     std::error_code code;
     String message;
@@ -39,14 +41,11 @@ template<typename T>
     return Result<std::decay_t<T>>(std::forward<T>(value));
 }
 
-[[nodiscard]] constexpr auto Ok() -> Result<Unit> {
-    return Result<Unit>(unit);
-}
+[[nodiscard]] constexpr auto Ok() -> Result<Unit> { return unit; }
 
 template<typename E>
 [[nodiscard]] constexpr auto Err(E&& error) -> std::unexpected<std::decay_t<E>>
 {
-    return std::unexpected(std::forward<E>(error));
+    return std::unexpected<std::decay_t<E>>(std::forward<E>(error));
 }
-
 } // namespace rain
